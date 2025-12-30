@@ -135,5 +135,8 @@ dist
 !.yarn/versions
 
 # Vite logs files
-vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# AI Agent Specific
+.agent/
+CODE_REVIEW.md
