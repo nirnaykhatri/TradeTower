@@ -31,6 +31,12 @@ export class LoggerService {
         }
     }
 
+    public debug(message: string, meta?: any) {
+        if (this.shouldLog('debug')) {
+            console.debug(`[DEBUG] ${new Date().toISOString()}: ${message}`, meta || '');
+        }
+    }
+
     private shouldLog(level: string): boolean {
         const levels = ['error', 'warn', 'info', 'debug'];
         const currentLevel = config.get('LOG_LEVEL');

@@ -8,6 +8,8 @@ import { logger } from './services/logger';
 import { requireUserContext } from './middleware/userContext';
 import { errorHandler } from './middleware/errorHandler';
 import { AppError } from './utils/error';
+import exchangeRoutes from './routes/exchangeRoutes';
+import { appConfigManager } from './config/appConfig';
 
 export class App {
     public app: Express;
@@ -44,6 +46,9 @@ export class App {
             });
         });
 
+        // Mount Domain Routes
+        apiRouter.use('/v1/exchanges', exchangeRoutes);
+
         this.app.use('/api', apiRouter);
 
         // 404 Handler (Fix High Issue 6)
@@ -56,7 +61,13 @@ export class App {
         this.app.use(errorHandler);
     }
 
-    public start(): void {
+    public async start(): Promise<void> {
+        // 1. Load Dynamic Config from Azure
+        const azureConfig = await appConfigManager.loadConfiguration();
+        config.reload(azureConfig);
+
+        // 2. Validate Env (Re-run validation now that we have potential Azure values)
+
         const port = config.get('PORT');
         this.server = this.app.listen(port, () => {
             logger.info(`🚀 Server running on port ${port}`);

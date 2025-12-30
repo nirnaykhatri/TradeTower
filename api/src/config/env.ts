@@ -11,13 +11,15 @@ const configSchema = z.object({
     AZURE_AD_B2C_CLIENT_ID: z.string().min(1, 'Client ID is required'),
     LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
     NEXTAUTH_URL: z.string().url().default('http://localhost:3000'),
+    // Key Vault
+    KEY_VAULT_URL: z.string().url().optional(), // Optional in dev if mocking, but required for KeyVaultService
     // Application Insights
     APPINSIGHTS_CONNECTION_STRING: z.string().optional(),
 });
 
 class ConfigService {
     private static instance: ConfigService;
-    public readonly values: z.infer<typeof configSchema>;
+    public values: z.infer<typeof configSchema>;
 
     private constructor() {
         try {
@@ -27,6 +29,28 @@ class ConfigService {
                 throw new AppError(
                     500,
                     `Configuration Validation Failed: ${error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`
+                );
+            }
+            throw error;
+        }
+    }
+
+    public reload(overrides: Record<string, string> = {}): void {
+        try {
+            // Filter out undefined values before merge (Fix P0 Issue 2)
+            const cleanOverrides = Object.fromEntries(
+                Object.entries(overrides).filter(([_, v]) => v !== undefined)
+            );
+
+            // Merge process.env with overrides (overrides take precedence)
+            const rawConfig = { ...process.env, ...cleanOverrides };
+
+            this.values = configSchema.parse(rawConfig);
+        } catch (error) {
+            if (error instanceof z.ZodError) {
+                throw new AppError(
+                    500,
+                    `Configuration Reload Failed: ${error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ')}`
                 );
             }
             throw error;
