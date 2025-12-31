@@ -1,4 +1,4 @@
-import { BotInstance } from '../../models/cosmosModels';
+import { BotInstance } from '@trading-tower/shared';
 import { BaseRepository } from './BaseRepository';
 
 export class BotRepository extends BaseRepository<BotInstance> {

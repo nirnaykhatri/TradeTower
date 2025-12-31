@@ -1,6 +1,6 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { dbService } from "../services/cosmos";
-import { BotInstance, TradingSignal } from "../types/models";
+import { BotInstance, TradingSignal } from "@trading-tower/shared";
 import { randomUUID, timingSafeEqual } from "crypto";
 import { z } from "zod";
 

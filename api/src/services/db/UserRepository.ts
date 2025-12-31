@@ -1,4 +1,4 @@
-import { UserProfile } from '../../models/cosmosModels';
+import { UserProfile } from '@trading-tower/shared';
 import { BaseRepository } from './BaseRepository';
 
 export class UserRepository extends BaseRepository<UserProfile> {

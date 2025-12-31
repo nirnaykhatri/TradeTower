@@ -1,4 +1,4 @@
-import { TradeOrder } from '../../models/cosmosModels';
+import { TradeOrder } from '@trading-tower/shared';
 import { BaseRepository } from './BaseRepository';
 
 export class OrderRepository extends BaseRepository<TradeOrder> {

@@ -1,4 +1,4 @@
-import { PerformanceSnapshot } from '../../models/cosmosModels';
+import { PerformanceSnapshot } from '@trading-tower/shared';
 import { BaseRepository } from './BaseRepository';
 
 export class PerformanceRepository extends BaseRepository<PerformanceSnapshot> {

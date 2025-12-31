@@ -1,0 +1,13 @@
+{
+    "name": "trading-tower",
+    "private": true,
+    "workspaces": [
+        "api",
+        "webhook",
+        "shared"
+    ],
+    "scripts": {
+        "build": "npm run build --workspaces --if-present",
+        "test": "npm test --workspaces --if-present"
+    }
+}

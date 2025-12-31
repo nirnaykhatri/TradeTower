@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { botRepository } from '../services/db/BotRepository';
-import { BotInstance } from '../models/cosmosModels';
+import { BotInstance } from '@trading-tower/shared';
 import { AppError } from '../utils/error';
 import { logger } from '../services/logger';
 import { z } from 'zod';

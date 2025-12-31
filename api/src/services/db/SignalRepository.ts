@@ -1,4 +1,4 @@
-import { TradingSignal } from '../../models/cosmosModels';
+import { TradingSignal } from '@trading-tower/shared';
 import { BaseRepository } from './BaseRepository';
 
 export class SignalRepository extends BaseRepository<TradingSignal> {

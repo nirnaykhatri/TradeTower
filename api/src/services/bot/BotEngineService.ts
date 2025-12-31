@@ -1,5 +1,5 @@
 import { logger } from '../logger';
-import { BotInstance } from '../../models/cosmosModels';
+import { BotInstance } from '@trading-tower/shared';
 
 /**
  * Service to handle communication with the Bot Execution Engine.
