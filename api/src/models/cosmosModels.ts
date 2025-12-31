@@ -20,6 +20,8 @@ export interface BotInstance {
     pair: string;
     strategyType: 'GRID' | 'DCA' | 'BTD' | 'COMBO' | 'LOOP' | 'DCA_FUTURES' | 'FUTURES_GRID' | 'TWAP';
     status: 'stopped' | 'running' | 'paused' | 'completed' | 'error';
+    triggerType: 'manual' | 'webhook' | 'indicator';
+    webhookSecret?: string;
     config: any; // Strategy-specific config
     totalPnL: number;
     totalTrades: number;

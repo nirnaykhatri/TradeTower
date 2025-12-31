@@ -4,7 +4,7 @@ import { BotInstance } from '../models/cosmosModels';
 import { AppError } from '../utils/error';
 import { logger } from '../services/logger';
 import { z } from 'zod';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 
 import { botEngineService } from '../services/bot/BotEngineService';
 
@@ -159,6 +159,7 @@ const botSchema = z.object({
     exchangeId: z.string().min(1),
     pair: z.string().min(3),
     strategyType: z.enum(['GRID', 'DCA', 'BTD', 'COMBO', 'LOOP', 'DCA_FUTURES', 'FUTURES_GRID', 'TWAP']),
+    triggerType: z.enum(['manual', 'webhook', 'indicator']).default('manual'),
     config: z.any()
 }).refine(data => {
     // Manual refinement for the config based on strategyType
@@ -181,6 +182,7 @@ const updateBotSchema = z.object({
     exchangeId: z.string().min(1).optional(),
     pair: z.string().min(3).optional(),
     strategyType: z.enum(['GRID', 'DCA', 'BTD', 'COMBO', 'LOOP', 'DCA_FUTURES', 'FUTURES_GRID', 'TWAP']).optional(),
+    triggerType: z.enum(['manual', 'webhook', 'indicator']).optional(),
     config: z.any().optional()
 });
 
@@ -201,6 +203,7 @@ export class BotController {
                 totalPnL: 0,
                 totalTrades: 0,
                 winRate: 0,
+                webhookSecret: validatedData.triggerType === 'webhook' ? randomBytes(24).toString('hex') : undefined,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
             } as unknown as BotInstance;
