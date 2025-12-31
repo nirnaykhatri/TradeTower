@@ -10,7 +10,11 @@ import { errorHandler } from './middleware/errorHandler';
 import { AppError } from './utils/error';
 import exchangeRoutes from './routes/exchangeRoutes';
 import authRoutes from './routes/authRoutes';
+import botRoutes from './routes/botRoutes';
+import orderRoutes from './routes/orderRoutes';
+import performanceRoutes from './routes/performanceRoutes';
 import { appConfigManager } from './config/appConfig';
+import { dbService } from './services/db/CosmosService';
 
 export class App {
     public app: Express;
@@ -43,6 +47,9 @@ export class App {
         // Mount Domain Routes
         apiRouter.use('/v1/auth', authRoutes);
         apiRouter.use('/v1/exchanges', exchangeRoutes);
+        apiRouter.use('/v1/bots', botRoutes);
+        apiRouter.use('/v1/orders', orderRoutes);
+        apiRouter.use('/v1/metrics', performanceRoutes);
 
         this.app.use('/api', apiRouter);
 
@@ -61,7 +68,10 @@ export class App {
         const azureConfig = await appConfigManager.loadConfiguration();
         config.reload(azureConfig);
 
-        // 2. Validate Env (Re-run validation now that we have potential Azure values)
+        // 2. Initialize Database Connection (Fix P0 Issue: Fail early if DB is down)
+        await dbService.connect();
+
+        // 3. Validate Env (Re-run validation now that we have potential Azure values)
 
         const port = config.get('PORT');
         this.server = this.app.listen(port, () => {

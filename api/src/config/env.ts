@@ -15,6 +15,9 @@ const configSchema = z.object({
     KEY_VAULT_URL: z.string().url().optional(), // Optional in dev if mocking, but required for KeyVaultService
     // Application Insights
     APPINSIGHTS_CONNECTION_STRING: z.string().optional(),
+    // Cosmos DB
+    COSMOS_DB_ENDPOINT: z.string().url().optional(),
+    COSMOS_DB_NAME: z.string().default('TradingTowerDB'),
 });
 
 class ConfigService {

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { logger } from '../services/logger';
+import { userRepository } from '../services/db/UserRepository';
 
 /**
  * Controller for handling User Authentication & Profile metadata.
@@ -11,13 +12,16 @@ export class AuthController {
      */
     public async getMe(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
-            // User context is already populated by requireUserContext middleware
             const user = req.user;
+
+            // Fetch detailed profile from DB
+            const profile = await userRepository.getById(user.userId, user.userId);
 
             res.status(200).json({
                 status: 'success',
                 data: {
-                    user
+                    user,
+                    profile: profile || null
                 }
             });
         } catch (error) {
@@ -33,15 +37,18 @@ export class AuthController {
         try {
             const user = req.user;
 
-            // TODO: Implement Cosmos DB upsert logic here
-            // This ensures the user exists even if they haven't made any configuration changes yet
+            const profile = await userRepository.syncUser({
+                userId: user.userId,
+                email: user.email || '',
+                name: user.name || ''
+            });
 
-            logger.info(`User sync request received: ${user.userId} (${user.email})`);
+            logger.info(`User profile synced for ${user.userId}`);
 
             res.status(200).json({
                 status: 'success',
-                message: 'User profile sync request received',
-                data: { user }
+                message: 'User profile synchronized',
+                data: { profile }
             });
         } catch (error) {
             next(error);
