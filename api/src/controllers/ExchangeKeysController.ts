@@ -21,7 +21,7 @@ export class ExchangeKeysController {
      * Save (Encrypt) Exchange Keys
      * POST /api/v1/exchanges/:exchangeId/keys
      */
-    public async saveKeys(req: Request, res: Response, next: NextFunction) {
+    public async saveKeys(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const { exchangeId } = req.params;
             const userId = req.user.userId;
@@ -71,7 +71,7 @@ export class ExchangeKeysController {
      * Delete Exchange Keys
      * DELETE /api/v1/exchanges/:exchangeId/keys
      */
-    public async deleteKeys(req: Request, res: Response, next: NextFunction) {
+    public async deleteKeys(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const { exchangeId } = req.params;
             const userId = req.user.userId;
@@ -101,7 +101,7 @@ export class ExchangeKeysController {
      * Check if keys exist (Does NOT return actual keys)
      * GET /api/v1/exchanges/:exchangeId/status
      */
-    public async getKeyStatus(req: Request, res: Response, next: NextFunction) {
+    public async getKeyStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const { exchangeId } = req.params;
             const userId = req.user.userId;

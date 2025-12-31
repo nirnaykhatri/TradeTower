@@ -9,6 +9,7 @@ import { requireUserContext } from './middleware/userContext';
 import { errorHandler } from './middleware/errorHandler';
 import { AppError } from './utils/error';
 import exchangeRoutes from './routes/exchangeRoutes';
+import authRoutes from './routes/authRoutes';
 import { appConfigManager } from './config/appConfig';
 
 export class App {
@@ -39,14 +40,8 @@ export class App {
         const apiRouter = Router();
         apiRouter.use(requireUserContext);
 
-        apiRouter.get('/v1/me', (req, res) => {
-            res.json({
-                message: 'You are authenticated and isolated.',
-                context: req.user
-            });
-        });
-
         // Mount Domain Routes
+        apiRouter.use('/v1/auth', authRoutes);
         apiRouter.use('/v1/exchanges', exchangeRoutes);
 
         this.app.use('/api', apiRouter);
