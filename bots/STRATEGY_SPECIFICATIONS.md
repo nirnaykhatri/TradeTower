@@ -279,11 +279,13 @@ Executes large orders by breaking them into smaller sub-orders (slices) and plac
 
 ## Common Features Across All Strategies
 
-### Quick Setup
-All bots support:
-- **Short-term**: Aggressive, frequent trades
-- **Mid-term**: Balanced approach
-- **Long-term**: Conservative, patient strategy
+### Bot Start Conditions (Signal Sources)
+All bots support multi-source start conditions. Users can combine technical indicators and external signals:
+- **Indicators**: MACD, RSI, Stochastic
+- **Timeframes**: 1m, 5m, 15m, 30m, 1h, 4h, 1d
+- **External**: TradingView Webhooks, Manual intervention
+
+Bots will only execute the `baseOrder` when all active start conditions are met (logical AND) or as per user preference (logical OR - configurable).
 
 ### Backtesting
 - Historical data simulation (30d, 90d, 180d)
