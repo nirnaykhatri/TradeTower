@@ -1,6 +1,6 @@
 # Trading Bot Strategy Specifications
 
-This document provides detailed specifications for all 6 bot strategies supported by the platform.
+This document provides detailed specifications for all 8 bot strategies supported by the platform.
 
 ---
 
@@ -209,6 +209,74 @@ DCA strategy specifically for futures/derivatives markets with leverage support.
 
 ---
 
+## 7. **Futures Grid Bot** ⭐ NEW
+
+### Overview
+Combines grid trading efficiency with futures leverage. Places buy and sell orders within a price range using futures contracts to profit from volatility in either direction (Long/Short/Neutral).
+
+### Configuration Fields
+
+| Field | Type | Required | Description | Validation |
+|-------|------|----------|-------------|------------|
+| `exchange` | String | Yes | Selected futures exchange | Must support futures grid |
+| `pair` | String | Yes | Futures trading pair | Valid futures pair |
+| `strategyType` | Enum | Yes | `LONG`, `SHORT`, or `NEUTRAL` | - |
+| `marginType` | Enum | Yes | `ISOLATED` or `CROSS` | - |
+| `leverage` | Decimal | Yes | Leverage multiplier | 1x - 100x |
+| `investment` | Decimal | Yes | Total margin allocated | > 0 |
+| `lowPrice` | Decimal | Yes | Lower price boundary | > 0, < highPrice |
+| `highPrice` | Decimal | Yes | Upper price boundary | > lowPrice |
+| `gridQuantity` | Integer | Yes | Number of grid levels | 2 - 200 |
+| `gridMode` | Enum | Yes | `ARITHMETIC` or `GEOMETRIC` | - |
+| `triggerPrice` | Decimal | No | Price to activate the bot | > 0 |
+| `stopLoss` | Decimal | No | Price to trigger stop loss | - |
+| `takeProfit` | Decimal | No | Price to trigger take profit | - |
+| `closePositionOnStop` | Boolean | No | Close all positions on bot stop | Default: true |
+
+### Execution Logic
+1. **Initialize**: Calculate grid levels based on `gridMode` (fixed price diff for Arithmetic, fixed % diff for Geometric).
+2. **Strategy Direction**:
+   - **Long**: Profit as price rises within range. Buys low, sells high.
+   - **Short**: Profit as price falls within range. Sells high, buys low.
+   - **Neutral**: Profit from volatility. Starts with no initial position; buys when price hits lower levels and sells when price hits higher levels.
+3. **Execution**: Place limit orders at calculated grid levels with selected leverage.
+4. **Active Trading**: When a buy/sell order is filled, immediately place the corresponding sell/buy order at the adjacent grid level.
+5. **Safety**: Monitor for `triggerPrice` to start and `stopLoss`/`takeProfit` to terminate.
+6. **Liquidation Check**: Continuously monitor margin ratio to prevent liquidation.
+
+---
+
+## 8. **TWAP (Time-Weighted Average Price) Bot** ⭐ NEW
+
+### Overview
+Executes large orders by breaking them into smaller sub-orders (slices) and placing them at regular time intervals over a specified duration to minimize market impact and slippage.
+
+### Configuration Fields
+
+| Field | Type | Required | Description | Validation |
+|-------|------|----------|-------------|------------|
+| `exchange` | String | Yes | Selected exchange | Must support TWAP |
+| `pair` | String | Yes | Trading pair | Valid pair on exchange |
+| `direction` | Enum | Yes | `BUY` (Long) or `SELL` (Short) | - |
+| `totalAmount` | Decimal | Yes | Total quantity to trade | > 0 |
+| `duration` | Integer | Yes | Total execution time (minutes) | 5 - 1440 (24h) |
+| `frequency` | Integer | Yes | Interval between sub-orders (seconds) | 5 - 60 |
+| `marginType` | Enum | Yes | `ISOLATED` or `CROSS` | - |
+| `leverage` | Decimal | Yes | Leverage multiplier | 1x - 100x |
+| `reduceOnly` | Boolean | No | Only reduce or close positions | Default: false |
+| `priceLimit` | Decimal | No | Max/min price for execution | > 0 |
+
+### Execution Logic
+1. **Calculate Slices**: The total amount is divided by the number of intervals (Duration / Frequency) to determine the size of each sub-order.
+2. **Timing**: The bot sets a timer based on the `frequency`.
+3. **Execution**: At each interval, the bot places a **Market Order** (IOC) for the slice amount.
+4. **Monitoring**:
+   - If a `priceLimit` is set, the bot pauses execution if the market price moves beyond the limit.
+   - The bot continues until the `totalAmount` is fully executed or the `duration` expires.
+5. **Completion**: Upon reaching the total amount or time, the bot stops and provides a report on the average execution price.
+
+---
+
 ## Common Features Across All Strategies
 
 ### Quick Setup
@@ -244,9 +312,9 @@ Each bot configuration is stored in Cosmos DB `Bots` container with:
 interface BotConfig {
   id: string;
   userId: string; // Partition key
-  strategyType: 'GRID' | 'DCA' | 'BTD' | 'COMBO' | 'LOOP' | 'DCA_FUTURES';
+  strategyType: 'GRID' | 'DCA' | 'BTD' | 'COMBO' | 'LOOP' | 'DCA_FUTURES' | 'FUTURES_GRID' | 'TWAP';
   status: 'stopped' | 'running' | 'paused' | 'completed' | 'error';
-  config: GridConfig | DCAConfig | BTDConfig | ComboConfig | LoopConfig | DCAFuturesConfig;
+  config: GridConfig | DCAConfig | BTDConfig | ComboConfig | LoopConfig | DCAFuturesConfig | FuturesGridConfig | TWAPConfig;
   createdAt: Date;
   updatedAt: Date;
   
