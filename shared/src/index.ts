@@ -45,6 +45,7 @@ export interface TradeOrder {
     filledAmount: number;
     fee: number;
     feeCurrency: string;
+    extendedHours?: boolean; // Support for pre/post market trading
     timestamp: string;
 }
 

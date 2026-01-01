@@ -4,7 +4,8 @@
     "workspaces": [
         "api",
         "webhook",
-        "shared"
+        "shared",
+        "connectors"
     ],
     "scripts": {
         "build": "npm run build --workspaces --if-present",
