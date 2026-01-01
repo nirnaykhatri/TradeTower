@@ -1,118 +1,108 @@
-import { BTDStrategy } from './BTDStrategy';
+import { DCAFuturesStrategy } from './DCAFuturesStrategy';
 import { ComboConfig } from '../types/strategyConfig';
 import { TradeOrder } from '@trading-tower/shared';
 
 /**
- * Combo Bot (Grid + DCA Hybrid)
- * Extends BTD with advanced position management and dynamic rebalancing.
+ * Combo Bot (DCA Entry + Grid Exit)
+ * Extends DCA Futures to use Martingale/Safety Orders for entry (averaging down),
+ * but uses a Grid of Limit Orders for profit taking (distributing exit).
  */
-export class ComboStrategy extends BTDStrategy {
-    private currentPositionAmount: number = 0;
+export class ComboStrategy extends DCAFuturesStrategy {
+    private profitGridOrders: Map<string, TradeOrder> = new Map();
 
     protected get comboConfig(): ComboConfig {
-        return this.config as ComboConfig;
+        return this.config as unknown as ComboConfig;
     }
 
+    /**
+     * Override onOrderFilled to manage the Profit Grid.
+     * When we buy (Base or Safety), we update the Sell Grid.
+     * When we sell (Grid Hit), we record profit and potentially replenish?
+     * Bitsgap Combo usually just exits. But if it's "Grid", maybe it scalps?
+     * For now, standard Combo is: Accumulate via DCA, Sell off via Grid.
+     */
     async onOrderFilled(order: TradeOrder): Promise<void> {
-        // Track position size
-        if (order.side === 'buy') {
-            this.currentPositionAmount += order.amount;
+        // 1. Let DCA strategy handle the entry side (updating avgPrice, safety orders count)
+        // We only call super if it's a BUY (DCA entry) or if it handles logic we need.
+        // But DCAFutures.onOrderFilled might trigger 'executeExit' if TP is hit.
+        // We should ensure standard TP is disabled in config.
+
+        await super.onOrderFilled(order);
+
+        // 2. If it was a DCA Buy (Base or Safety), we need to restructure the Profit Grid
+        const isEntry = (this.comboConfig.strategy === 'LONG' && order.side === 'buy') ||
+            (this.comboConfig.strategy === 'SHORT' && order.side === 'sell');
+
+        if (isEntry) {
+            console.log(`[Combo] Entry filled. Re-calculating Profit Grid.`);
+            await this.placeProfitGrid();
         } else {
-            this.currentPositionAmount -= (order.filledAmount || order.amount);
-        }
-
-        // 1. Position Size Limit Check
-        // If we reached the limit, we skip placing a new sell (if that's desired) or just stop buying.
-        // Usually, limit affects new Buys.
-
-        // --- Standard BTD logic for grid flipping ---
-        // If it's a Buy, it places a Sell. If it's a Sell, it places a Buy.
-        // We override this to respect position limits.
-
-        const gridIndex = this.gridLevels.findIndex(p => Math.abs(p - order.price) / p < 0.001);
-        if (gridIndex === -1) {
-            await this.recordTrade(order);
-            return;
-        }
-
-        if (order.side === 'buy') {
-            await this.recordTrade(order);
-            // Filled a dip buy, place sell at next level up
-            if (gridIndex + 1 < this.gridLevels.length) {
-                const sellPrice = this.gridLevels[gridIndex + 1];
-                await this.placeGridOrder('sell', sellPrice, Math.abs(order.amount));
-            }
-        } else {
-            await this.recordTrade(order);
-            // Filled a sell, check if we can place buy back at level below
-            if (gridIndex - 1 >= 0) {
-                const buyPrice = this.gridLevels[gridIndex - 1];
-                const investmentPerLevel = this.config.investment / this.config.gridLevels;
-                const buyAmount = investmentPerLevel / buyPrice;
-
-                // Respect Position Size Limit
-                if (!this.comboConfig.positionSizeLimit || (this.currentPositionAmount + buyAmount <= this.comboConfig.positionSizeLimit)) {
-                    await this.placeGridOrder('buy', buyPrice, buyAmount);
-                } else {
-                    console.log(`[ComboBot] Position size limit ${this.comboConfig.positionSizeLimit} reached. Skipping buy back at ${buyPrice}.`);
-                }
+            // It was a Sell (Profit Grid hit)
+            // Record manual profit (DCA strategy might not track this correctly if it wasn't a full exit)
+            // But super.onOrderFilled handles "Partial Sells" nicely IF we treat them as trades.
+            // We just need to remove it from our map.
+            if (this.profitGridOrders.has(order.id)) {
+                this.profitGridOrders.delete(order.id);
+                console.log(`[Combo] Grid Profit Level Hit!`);
             }
         }
     }
 
-    protected async placeGridOrder(side: 'buy' | 'sell', price: number, amount: number) {
-        try {
-            const order = await this.exchange.createOrder({
-                userId: this.bot.userId,
-                botId: this.bot.id,
-                pair: this.bot.pair,
-                side,
-                type: 'limit',
-                price,
-                amount
-            });
-            this.activeOrders.set(order.id, order);
-        } catch (e) {
-            console.error(`[ComboBot] Failed to place ${side} at ${price}:`, e);
+    /**
+     * Places a grid of Limit Close orders above the current Average Entry.
+     */
+    private async placeProfitGrid() {
+        // 1. Cancel existing grid
+        for (const [id, order] of this.profitGridOrders) {
+            try {
+                await this.exchange.cancelOrder(id, this.bot.pair);
+            } catch (e) {
+                // Ignore if already filled/gone
+            }
         }
-    }
+        this.profitGridOrders.clear();
 
-    async onPriceUpdate(price: number): Promise<void> {
-        await super.onPriceUpdate(price);
+        const totalPos = this.totalAmountFilled; // From BaseDCAStrategy
+        if (totalPos <= 0) return;
 
-        // --- Dynamic Rebalancing ---
-        // If the price moves too far from the center of the grid, 
-        // and rebalancing is enabled, we shift the grid.
-        if (this.comboConfig.dynamicRebalancing) {
-            const gridCenter = (this.currentLowPrice + this.currentHighPrice) / 2;
-            const deviation = Math.abs(price - gridCenter) / gridCenter;
+        const { gridLevels, gridStep, strategy } = this.comboConfig;
 
-            // If price deviates more than 20% of range, rebalance
-            const range = this.currentHighPrice - this.currentLowPrice;
-            if (deviation > 0.2) {
-                console.log(`[ComboBot] Dynamic Rebalancing: Price ${price} deviated from center. Re-centering grid.`);
-                await this.rebalanceGrid(price);
+        // Amount per grid level (simple distribution)
+        const amountPerLevel = totalPos / gridLevels;
+
+        // Distance calculation
+        const startPrice = this.avgEntryPrice;
+        const factor = strategy === 'LONG' ? 1 : -1;
+
+        for (let i = 1; i <= gridLevels; i++) {
+            const priceReq = startPrice * (1 + (gridStep * i / 100) * factor);
+            const side = strategy === 'LONG' ? 'sell' : 'buy';
+
+            try {
+                const order = await this.exchange.createOrder({
+                    userId: this.bot.userId,
+                    botId: this.bot.id,
+                    pair: this.bot.pair,
+                    side,
+                    type: 'limit',
+                    price: priceReq,
+                    amount: amountPerLevel,
+                    reduceOnly: true // Important for Futures Exit
+                });
+                this.profitGridOrders.set(order.id, order);
+            } catch (e) {
+                console.error(`[Combo] Failed to place profit grid level ${i}:`, e);
             }
         }
     }
 
-    private async rebalanceGrid(newCenter: number) {
-        // Cancel all existing grid orders
-        for (const orderId of this.activeOrders.keys()) {
-            await this.exchange.cancelOrder(orderId, this.bot.pair).catch(() => { });
-        }
-        this.activeOrders.clear();
-
-        // Recalculate range around new center
-        const halfRange = (this.currentHighPrice - this.currentLowPrice) / 2;
-        this.currentLowPrice = newCenter - halfRange;
-        this.currentHighPrice = newCenter + halfRange;
-
-        // Recalculate grid levels
-        await this.calculateAsymmetricGrid();
-
-        // Place new orders relative to current price
-        const ticker = await this.exchange.getTicker(this.bot.pair);
-        await this.placeGridOrders(ticker.lastPrice);
+    /**
+     * Override executeExit to ensure we protect our Grid state if panic sell happens
+     */
+    protected async executeExit(reason: string) {
+        // If standard DCA wants to exit (e.g. Stop Loss), we let it.
+        // It calls cancelAllActiveOrders.
+        await super.executeExit(reason);
+        this.profitGridOrders.clear();
     }
 }

@@ -43,6 +43,7 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
         const investment = this.config.investment / this.config.gridLevels;
 
         for (const price of this.gridLevels) {
+            // BTD only places BUY orders first
             if (price < currentPrice * 0.999) {
                 await this.placeOrder('buy', price, investment / price);
             }
@@ -79,41 +80,35 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
         if (this.isPaused) return;
         this.lastPrice = price;
 
+        // Trailing DOWN: Shifts the grid DOWN if price falls below the range
+        // This is crucial for "Buy The Dip" to catch deeper dips
         if (this.config.trailing !== false && price < (this.currentLowPrice - this.gridStepValue)) {
             await this.handleTrailingDown();
         }
 
+        // Trailing UP (Optional, usually for selling recovery)
         if (this.config.trailing !== false && price > (this.currentHighPrice + this.gridStepValue)) {
+            // BTD often focuses on accumulation, but trailing up helps exit if the rebound continues
             await this.handleTrailingUp();
         }
     }
 
     private async handleTrailingDown() {
+        console.log(`[BTD] Trailing Down triggered.`);
         this.gridLevels.sort((a, b) => a - b);
+
+        // Remove top level
         const topLevel = this.gridLevels[this.gridLevels.length - 1];
 
+        // Cancel order at top level if exists (unlikely in BTD as we buy down, but good for cleanup)
         for (const [id, order] of this.activeOrders.entries()) {
             if (Math.abs(order.price - topLevel) / topLevel < 0.001) {
                 await this.exchange.cancelOrder(id, this.bot.pair).catch(() => { });
                 this.activeOrders.delete(id);
-
-                if (order.side === 'sell') {
-                    try {
-                        const fill = await this.exchange.createOrder({
-                            userId: this.bot.userId,
-                            botId: this.bot.id,
-                            pair: this.bot.pair,
-                            side: 'sell',
-                            type: 'market',
-                            amount: order.amount
-                        });
-                        await this.recordTrade(fill);
-                    } catch (e) { }
-                }
-                break;
             }
         }
 
+        // Shift Levels Logic
         this.gridLevels.pop();
         const newLow = this.currentLowPrice - this.gridStepValue;
         this.gridLevels.unshift(newLow);
@@ -121,33 +116,22 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
         this.currentLowPrice = newLow;
         this.currentHighPrice -= this.gridStepValue;
 
+        // Place new buy at the new low bottom
         const investment = this.config.investment / this.config.gridLevels;
         await this.placeOrder('buy', newLow, investment / newLow);
     }
 
     private async handleTrailingUp() {
+        // Logic to follow price up
         this.gridLevels.sort((a, b) => a - b);
+
+        // Remove bottom level
         const bottomLevel = this.gridLevels[0];
 
         for (const [id, order] of this.activeOrders.entries()) {
             if (Math.abs(order.price - bottomLevel) / bottomLevel < 0.001) {
                 await this.exchange.cancelOrder(id, this.bot.pair).catch(() => { });
                 this.activeOrders.delete(id);
-
-                if (order.side === 'buy') {
-                    try {
-                        const fill = await this.exchange.createOrder({
-                            userId: this.bot.userId,
-                            botId: this.bot.id,
-                            pair: this.bot.pair,
-                            side: 'buy',
-                            type: 'market',
-                            amount: order.amount
-                        });
-                        await this.recordTrade(fill);
-                    } catch (e) { }
-                }
-                break;
             }
         }
 
@@ -157,6 +141,11 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
 
         this.currentLowPrice += this.gridStepValue;
         this.currentHighPrice = newHigh;
+
+        // Usually we don't place buy orders ABOVE current price in BTD, 
+        // but if the grid shifts up, we might re-populate the levels below current price 
+        // or place sell orders if we are in profit. 
+        // For pure accumulation BTD, we might just shift the range.
     }
 
     async onOrderFilled(order: TradeOrder): Promise<void> {
@@ -169,16 +158,31 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
         if (gridIndex === -1) return;
 
         if (order.side === 'buy') {
+            // Executed Buy the Dip.
+            // BTD Strategy typically places a Sell limit above to capture the rebound ("Scalping the dip")
             if (gridIndex + 1 < this.gridLevels.length) {
                 const sellPrice = this.gridLevels[gridIndex + 1];
                 await this.placeOrder('sell', sellPrice, order.amount);
             }
         } else {
+            // Sold the rebound. Re-open buy limit for the next dip.
+
+            // Calculate Profit for this "Buy Low -> Sell High" mini-cycle
+            // BTD profit is realized in Quote currency (e.g. USDT)
             if (gridIndex - 1 >= 0) {
-                const buyPrice = this.gridLevels[gridIndex - 1];
+                const buyPrice = this.gridLevels[gridIndex - 1]; // The Buy that started this
+                // Approximate profit matching
+                const profit = (order.price - buyPrice) * order.amount;
+                if (profit > 0) {
+                    this.bot.performance.botProfit += profit;
+                    this.bot.performance.realizedPnL += profit;
+                }
+
                 await this.placeOrder('buy', buyPrice, order.amount);
             }
         }
+
+        this.bot.performance.totalTrades++;
     }
 
     async increaseInvestment(amount: number): Promise<void> {

@@ -70,10 +70,11 @@ export interface BTDConfig {
     takeProfitEnabled?: boolean;
 }
 
-export interface ComboConfig extends BTDConfig {
-    positionSizeLimit?: number;
-    reuseCompletedOrders?: boolean;
-    dynamicRebalancing?: boolean;
+export interface ComboConfig extends DCAFuturesConfig {
+    gridStep: number;
+    gridLevels: number;
+    // DCA part is inherited from DCAFuturesConfig (averagingOrders, etc.)
+    // Grid part uses gridStep/Levels for profit distribution
 }
 
 export interface LoopConfig {
@@ -83,6 +84,8 @@ export interface LoopConfig {
     orderDistance: number;
     orderCount: number;
     takeProfit?: number;
+    reinvestProfit?: boolean;
+    trailing?: boolean;
     takeProfitEnabled?: boolean;
 }
 

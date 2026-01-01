@@ -32,6 +32,11 @@ export interface BotPerformance {
     breakEvenPrice?: number;
     filledSafetyOrders?: number;
     totalSafetyOrders?: number;
+
+    // Futures Specific
+    liquidationPrice?: number;
+    marginRatio?: number;
+    activeMargin?: number;
 }
 
 export interface BotInstance {
@@ -70,6 +75,7 @@ export interface TradeOrder {
     feeCurrency: string;
     extendedHours?: boolean; // Support for pre/post market trading
     timestamp: string;
+    reduceOnly?: boolean;
 }
 
 export type SignalSource = 'tradingview' | 'manual' | 'MACD' | 'RSI' | 'Stochastic';

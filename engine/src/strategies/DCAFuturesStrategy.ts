@@ -21,6 +21,8 @@ export class DCAFuturesStrategy extends BaseDCAStrategy<DCAFuturesConfig> {
         // --- Liquidation Monitoring ---
         if (this.config.liquidationBuffer && this.avgEntryPrice > 0) {
             const liqPrice = this.calculateLiquidationPrice();
+            this.bot.performance.liquidationPrice = liqPrice; // Expose for UI
+
             const distance = Math.abs(price - liqPrice) / price * 100;
 
             if (distance <= this.config.liquidationBuffer) {
@@ -46,5 +48,17 @@ export class DCAFuturesStrategy extends BaseDCAStrategy<DCAFuturesConfig> {
         // Here we'd ideally tell the exchange the leverage.
         // For now, we assume it's set on the account or passed in the order request.
         await super.placeBaseOrder();
+    }
+
+    async increaseInvestment(amount: number): Promise<void> {
+        console.log(`[DCAFutures] Adding ${amount} margin to bot.`);
+        // For futures, this increases the 'active' margin or 'available' balance for safety orders
+        await super.increaseInvestment(amount);
+
+        // In a real exchange connector, we might need to physically move funds to Isolated Margin here
+        // e.g. await this.exchange.currencyTransfer(..., amount, 'ISOLATED_MARGIN');
+
+        // We do NOT cancel active orders automatically for DCA Futures to avoid realizing a loss/slippage during a dip.
+        // Instead, the new 'investment' cap allows 'placeNextSafetyOrder' to proceed if it was previously blocked by max budget.
     }
 }

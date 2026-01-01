@@ -297,8 +297,13 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             });
             this.activeOrders.set(order.id, order);
             this.safetyOrderMap.set(order.id, index);
-        } catch (error) {
+        } catch (error: any) {
             console.error(`[DCA] SO ${index} failed:`, error);
+            if (error?.message?.includes('Insufficient funds') || error?.code === 'INSUFFICIENT_FUNDS') {
+                console.warn(`[DCA] Insufficient funds for Safety Order ${index}. Pausing bot.`);
+                await this.pause();
+                // We keep the bot paused so the user can add funds and manually 'Resume'
+            }
         }
     }
 
