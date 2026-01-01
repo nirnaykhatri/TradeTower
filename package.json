@@ -5,7 +5,8 @@
         "api",
         "webhook",
         "shared",
-        "connectors"
+        "connectors",
+        "engine"
     ],
     "scripts": {
         "build": "npm run build --workspaces --if-present",

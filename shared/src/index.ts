@@ -12,6 +12,28 @@ export interface UserProfile {
     };
 }
 
+export interface BotPerformance {
+    totalPnL: number;        // Total profit in quote currency
+    totalPnLPercent: number; // Growth relative to initial investment
+    botProfit: number;       // Profit from completed grid cycles/trades
+    realizedPnL: number;     // Profit from closed positions
+    unrealizedPnL: number;   // Current value of held assets vs cost (Value Change)
+    annualizedReturn: number;// Estimated yearly return %
+    drawdown: number;        // Max drop from peak
+    totalTrades: number;
+    winRate: number;
+    baseBalance: number;     // Amount of base asset currently held by bot
+    quoteBalance: number;    // Amount of quote asset currently held by bot
+    initialInvestment: number;
+    initialPrice: number;    // Price when bot started
+
+    // DCA Specific (can be used by other strategies partially)
+    avgEntryPrice?: number;
+    breakEvenPrice?: number;
+    filledSafetyOrders?: number;
+    totalSafetyOrders?: number;
+}
+
 export interface BotInstance {
     id: string; // Unique bot ID
     userId: string; // Partition key
@@ -23,9 +45,10 @@ export interface BotInstance {
     triggerType: 'manual' | 'webhook' | 'indicator';
     webhookSecret?: string;
     config: any; // Strategy-specific config
-    totalPnL: number;
-    totalTrades: number;
-    winRate: number;
+
+    // Performance metrics
+    performance: BotPerformance;
+
     lastExecutionAt?: string;
     createdAt: string;
     updatedAt: string;
@@ -76,3 +99,8 @@ export interface PerformanceSnapshot {
     dailyPnL: number;
     drawdown: number;
 }
+export * from './indicators/IndicatorService';
+export * from './db/CosmosService';
+export * from './db/BaseRepository';
+export * from './db/BotRepository';
+export * from './db/OrderRepository';
