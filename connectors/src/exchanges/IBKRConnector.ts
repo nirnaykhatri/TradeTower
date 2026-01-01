@@ -1,5 +1,5 @@
 import { IExchangeConnector, ExchangeBalance, TickerData } from '../interfaces/IExchangeConnector';
-import { TradeOrder } from '@trading-tower/shared';
+import { TradeOrder, RateLimiter } from '@trading-tower/shared';
 import { ExchangeError } from '../interfaces/ExchangeError';
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import * as https from 'https';
@@ -8,12 +8,19 @@ export class IBKRConnector implements IExchangeConnector {
     public readonly name = 'IBKR';
     private client: AxiosInstance;
     private agent: https.Agent;
+    private rateLimiter: RateLimiter;
 
     constructor(private host: string, private port: number = 5000) {
         this.agent = new https.Agent({ rejectUnauthorized: false });
         this.client = axios.create({
             baseURL: `https://${host}:${port}/v1/api`,
             httpsAgent: this.agent
+        });
+
+        // Initialize rate limiter for IBKR API (100 requests per minute)
+        this.rateLimiter = new RateLimiter({
+            maxRequests: 100,
+            windowMs: 60000 // 1 minute
         });
 
         // Add error normalization interceptor
@@ -32,7 +39,9 @@ export class IBKRConnector implements IExchangeConnector {
 
     async ping(): Promise<boolean> {
         try {
-            const response = await this.client.get('/tickle');
+            const response = await this.rateLimiter.execute(() =>
+                this.client.get('/tickle')
+            );
             return response.status === 200;
         } catch {
             return false;
@@ -40,12 +49,16 @@ export class IBKRConnector implements IExchangeConnector {
     }
 
     async getBalances(): Promise<ExchangeBalance[]> {
-        const accountsRes = await this.client.get('/iserver/accounts');
+        const accountsRes = await this.rateLimiter.execute(() =>
+            this.client.get('/iserver/accounts')
+        );
         // Handle multiple accounts - for simplicity, we use the first one, but we check if it exists.
         const accountId = accountsRes.data.accounts?.[0];
         if (!accountId) throw new ExchangeError(this.name, 'No accounts found');
 
-        const response = await this.client.get(`/iserver/account/${accountId}/summary`);
+        const response = await this.rateLimiter.execute(() =>
+            this.client.get(`/iserver/account/${accountId}/summary`)
+        );
 
         return [{
             asset: 'USD',
@@ -54,17 +67,29 @@ export class IBKRConnector implements IExchangeConnector {
         }];
     }
 
+    /**
+     * Get ticker data for trading symbol
+     * 
+     * Rate limited to prevent exceeding IBKR API limits.
+     * 
+     * @param symbol Trading symbol (e.g., 'AAPL')
+     * @returns Ticker data with price and volume
+     */
     async getTicker(symbol: string): Promise<TickerData> {
-        const searchRes = await this.client.get('/iserver/secdef/search', {
-            params: { symbol: symbol.toUpperCase() }
-        });
+        const searchRes = await this.rateLimiter.execute(() =>
+            this.client.get('/iserver/secdef/search', {
+                params: { symbol: symbol.toUpperCase() }
+            })
+        );
 
         const conid = searchRes.data[0]?.conid;
         if (!conid) throw new ExchangeError(this.name, `Symbol ${symbol} not found on IBKR`);
 
-        const response = await this.client.get('/iserver/marketdata/snapshot', {
+        const response = await this.rateLimiter.execute(() =>
+            this.client.get('/iserver/marketdata/snapshot', {
             params: { conids: conid, fields: '31,70,71,84' }
-        });
+        })
+        );
 
         const data = response.data[0];
         return {
@@ -81,14 +106,27 @@ export class IBKRConnector implements IExchangeConnector {
         return [];
     }
 
+    /**
+     * Create a new order on IBKR
+     * 
+     * Rate limited to prevent hitting API limits.
+     * Supports market and limit orders.
+     * 
+     * @param order Order specification
+     * @returns Created order details
+     */
     async createOrder(order: Partial<TradeOrder>): Promise<TradeOrder> {
-        const accountsRes = await this.client.get('/iserver/accounts');
+        const accountsRes = await this.rateLimiter.execute(() =>
+            this.client.get('/iserver/accounts')
+        );
         const accountId = accountsRes.data.accounts?.[0];
         if (!accountId) throw new ExchangeError(this.name, 'No accounts found');
 
-        const searchRes = await this.client.get('/secdef/search', {
-            params: { symbol: order.pair?.toUpperCase() }
-        });
+        const searchRes = await this.rateLimiter.execute(() =>
+            this.client.get('/secdef/search', {
+                params: { symbol: order.pair?.toUpperCase() }
+            })
+        );
         const conid = searchRes.data[0]?.conid;
         if (!conid) throw new ExchangeError(this.name, `Symbol ${order.pair} not found`);
 
@@ -104,7 +142,9 @@ export class IBKRConnector implements IExchangeConnector {
             }]
         };
 
-        const response = await this.client.post(`/iserver/account/${accountId}/orders`, ibOrder);
+        const response = await this.rateLimiter.execute(() =>
+            this.client.post(`/iserver/account/${accountId}/orders`, ibOrder)
+        );
         const res = response.data[0];
 
         return {
@@ -126,12 +166,25 @@ export class IBKRConnector implements IExchangeConnector {
         };
     }
 
+    /**
+     * Cancel an open order
+     * 
+     * Rate limited to prevent exceeding API limits.
+     * 
+     * @param orderId Order ID to cancel
+     * @param symbol Trading symbol
+     * @returns True if cancellation successful
+     */
     async cancelOrder(orderId: string, symbol: string): Promise<boolean> {
-        const accountsRes = await this.client.get('/iserver/accounts');
+        const accountsRes = await this.rateLimiter.execute(() =>
+            this.client.get('/iserver/accounts')
+        );
         const accountId = accountsRes.data.accounts?.[0];
         if (!accountId) throw new ExchangeError(this.name, 'No accounts found');
 
-        await this.client.delete(`/iserver/account/${accountId}/order/${orderId}`);
+        await this.rateLimiter.execute(() =>
+            this.client.delete(`/iserver/account/${accountId}/order/${orderId}`)
+        );
         return true;
     }
 

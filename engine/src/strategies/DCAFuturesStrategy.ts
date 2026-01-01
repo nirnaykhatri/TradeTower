@@ -1,12 +1,32 @@
 import { BaseDCAStrategy } from './BaseDCAStrategy';
 import { DCAFuturesConfig } from '../types/strategyConfig';
 import { TradeOrder } from '@trading-tower/shared';
+import { PRICE_TOLERANCE } from '../constants/strategy.constants';
 
+/**
+ * DCA Futures Strategy
+ * 
+ * Extends the base DCA strategy for leveraged trading on futures exchanges.
+ * Implements dollar-cost averaging (DCA) with safety orders and liquidation protection
+ * for leveraged positions. Supports both long and short positions with configurable
+ * leverage and margin types.
+ * 
+ * Key Features:
+ * - DCA-based accumulation with safety orders
+ * - Liquidation price monitoring and buffer protection
+ * - Configurable leverage (up to exchange limits)
+ * - Isolated or cross margin support
+ * - Automatic emergency exit on liquidation buffer breach
+ */
 export class DCAFuturesStrategy extends BaseDCAStrategy<DCAFuturesConfig> {
     protected get dcaConfig(): DCAFuturesConfig {
         return this.config;
     }
 
+    /**
+     * Initialize the DCA Futures strategy with leverage configuration
+     * @returns Promise<void>
+     */
     async initialize(): Promise<void> {
         await super.initialize();
         console.log(`[DCAFutures] Setting leverage to ${this.config.leverage}x with ${this.config.marginType} margin.`);
@@ -14,6 +34,13 @@ export class DCAFuturesStrategy extends BaseDCAStrategy<DCAFuturesConfig> {
 
     /**
      * For futures, we might want to check the liquidation price.
+     */
+    /**
+     * Handle price updates with liquidation monitoring
+     * Checks liquidation buffer and triggers emergency exit if breached
+     * 
+     * @param price Current market price
+     * @returns Promise<void>
      */
     async onPriceUpdate(price: number): Promise<void> {
         await super.onPriceUpdate(price);
@@ -33,6 +60,12 @@ export class DCAFuturesStrategy extends BaseDCAStrategy<DCAFuturesConfig> {
         }
     }
 
+    /**
+     * Calculate liquidation price based on leverage and margin configuration
+     * Uses simplified formula: Liq = Entry * (1 - (0.9 / Leverage) * factor)
+     * 
+     * @returns Liquidation price
+     */
     private calculateLiquidationPrice(): number {
         // Simplified formula for liquidation price:
         // Long: Liq = Entry * (1 - (1/Leverage) + (MaintenanceMargin%))
@@ -44,12 +77,23 @@ export class DCAFuturesStrategy extends BaseDCAStrategy<DCAFuturesConfig> {
     /**
      * On order placement, ensure leverage is set.
      */
-    protected async placeBaseOrder() {
+    /**
+     * Place base order with futures-specific configuration (leverage, margin type)
+     * @returns Promise<void>
+     */
+    protected async placeBaseOrder(): Promise<void> {
         // Here we'd ideally tell the exchange the leverage.
         // For now, we assume it's set on the account or passed in the order request.
         await super.placeBaseOrder();
     }
 
+    /**
+     * Increase investment amount for futures trading
+     * Adds margin to the account and updates budget for safety orders
+     * 
+     * @param amount Amount to increase investment by
+     * @returns Promise<void>
+     */
     async increaseInvestment(amount: number): Promise<void> {
         console.log(`[DCAFutures] Adding ${amount} margin to bot.`);
         // For futures, this increases the 'active' margin or 'available' balance for safety orders

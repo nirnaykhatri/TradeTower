@@ -1,9 +1,11 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
+import { TradeOrder, RateLimiter, ExchangeRateLimiters } from '@trading-tower/shared';
 import { AuthUtils } from '../utils/AuthUtils';
 import { ExchangeError } from '../interfaces/ExchangeError';
 
 export abstract class BaseCoinbaseConnector {
     protected client: AxiosInstance;
+    protected rateLimiter: RateLimiter;
     protected abstract readonly productType: string;
 
     constructor(
@@ -14,6 +16,9 @@ export abstract class BaseCoinbaseConnector {
         this.client = axios.create({
             baseURL: 'https://api.coinbase.com'
         });
+
+        // Initialize rate limiter for Coinbase API
+        this.rateLimiter = ExchangeRateLimiters.COINBASE;
 
         // Add interceptor for authentication
         this.client.interceptors.request.use((config) => {

@@ -110,3 +110,15 @@ export * from './db/CosmosService';
 export * from './db/BaseRepository';
 export * from './db/BotRepository';
 export * from './db/OrderRepository';
+export * from './errors';
+export * from './utils/RateLimiter';
+export * from './utils/validation';
+
+// Create default database service and repositories for convenience
+import { dbService } from './db/CosmosService';
+import { createBotRepository } from './db/BotRepository';
+import { createOrderRepository } from './db/OrderRepository';
+
+// Create default repository instances with the default database service
+export const botRepository = createBotRepository(dbService);
+export const orderRepository = createOrderRepository(dbService);

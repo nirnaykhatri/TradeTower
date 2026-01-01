@@ -1,39 +1,88 @@
 import { BaseStrategy, ExitMode } from './BaseStrategy';
-import { TradeOrder, indicatorService, botRepository } from '@trading-tower/shared';
+import { TradeOrder, indicatorService, botRepository, ValidationError, CriticalStrategyError } from '@trading-tower/shared';
+import {
+    MAX_FILL_HISTORY,
+    PUMP_PROTECTION_THRESHOLD,
+    PUMP_PROTECTION_WINDOW_MS,
+    PRICE_TOLERANCE
+} from '../constants/strategy.constants';
 
+/**
+ * Base Dollar Cost Averaging Strategy
+ * 
+ * Implements core DCA logic including:
+ * - Base order placement with configurable conditions
+ * - Safety orders (averaging) with step and amount multipliers
+ * - Take profit with trailing TP support
+ * - Stop loss with trailing SL support
+ * - Pump protection via velocity detection
+ * - Global kill switches (profit/loss limits)
+ * - Position reinvestment
+ * 
+ * Extended by DCAStrategy (spot) and DCAFuturesStrategy (perpetuals)
+ */
 export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
+    /** Active limit orders awaiting fill */
     protected activeOrders: Map<string, TradeOrder> = new Map();
+    
+    /** Maps order IDs to their safety order index */
     protected safetyOrderMap: Map<string, number> = new Map();
+    
+    /** All filled orders in current cycle */
     protected filledOrders: TradeOrder[] = [];
 
+    /** Volume-weighted average entry price */
     protected avgEntryPrice: number = 0;
+    
+    /** Total position size in base asset */
     protected totalAmountFilled: number = 0;
+    
+    /** Total spent in quote asset */
     protected totalQuoteAssetSpent: number = 0;
 
+    /** Count of filled safety orders */
     protected safetyOrdersFilledCount: number = 0;
+    
+    /** Next safety order index to place */
     protected nextSafetyOrderToIndex: number = 0;
 
-    // Trailing TP State
+    /** Whether trailing take profit is active */
     protected isTrailingTP: boolean = false;
+    
+    /** Peak price for trailing TP calculation */
     protected trailingTPPrice: number = 0;
 
-    // Trailing SL State
+    /** Current stop loss trigger price */
     protected currentSLPrice: number = 0;
 
-    // Cycle state
+    /** Whether waiting for entry condition */
     protected isWaitingForEntry: boolean = false;
 
-    // For drawdown and velocity tracking
+    /** Peak equity for drawdown calculation */
     private peakEquity: number = 0;
+    
+    /** Recent fill timestamps for pump detection */
     private lastFills: number[] = [];
 
+    /** Get DCA configuration from derived class */
     protected abstract get dcaConfig(): any;
 
+    /**
+     * Initialize DCA strategy
+     * 
+     * Sets up initial equity tracking for drawdown calculation.
+     */
     async initialize(): Promise<void> {
         console.log(`[DCA] Initializing ${this.bot.strategyType} for ${this.bot.pair}`);
         this.peakEquity = this.bot.performance.initialInvestment + this.bot.performance.totalPnL;
     }
 
+    /**
+     * Start DCA strategy execution
+     * 
+     * Checks global kill switches and places base order
+     * or waits for entry condition.
+     */
     async start(): Promise<void> {
         await this.updateBotStatus('running');
 
@@ -50,6 +99,15 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         }
     }
 
+    /**
+     * Check global profit/loss kill switches
+     * 
+     * Stops bot if:
+     * - Total profit reaches target
+     * - Total loss exceeds allowed limit
+     * 
+     * @returns True if kill switch triggered
+     */
     private checkGlobalKillSwitches(): boolean {
         const perf = this.bot.performance;
         if (this.dcaConfig.targetTotalProfit && perf.totalPnL >= this.dcaConfig.targetTotalProfit) {
@@ -65,12 +123,24 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         return false;
     }
 
-    protected async placeBaseOrder() {
+    /**
+     * Place initial base order
+     * 
+     * Performs pre-entry checks:
+     * - Price within min/max bounds
+     * - Pump protection not triggered
+     * 
+     * Creates market or limit order based on config.
+     * Initializes stop loss if configured.
+     * Places all safety orders if placeSafetyOrdersAtStart enabled.
+     */
+    protected async placeBaseOrder(): Promise<void> {
         if (this.isPaused) return;
 
         const ticker = await this.exchange.getTicker(this.bot.pair);
         const price = ticker.lastPrice;
 
+        // Check price bounds
         if (this.dcaConfig.maxPrice && price > this.dcaConfig.maxPrice) {
             this.isWaitingForEntry = true;
             return;
@@ -80,6 +150,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             return;
         }
 
+        // Check pump protection
         if (this.dcaConfig.pumpProtection && this.detectUnusualVelocity()) {
             this.isWaitingForEntry = true;
             return;
@@ -93,7 +164,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 this.bot.performance.initialPrice = price;
             }
 
-            const order = await this.exchange.createOrder({
+            const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
                 botId: this.bot.id,
                 pair: this.bot.pair,
@@ -106,40 +177,80 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             this.activeOrders.set(order.id, order);
             this.isWaitingForEntry = false;
 
+            // Set initial stop loss
             if (this.dcaConfig.stopLossPercent) {
                 const factor = this.dcaConfig.strategy === 'LONG' ? -1 : 1;
                 this.currentSLPrice = price * (1 + (this.dcaConfig.stopLossPercent / 100) * factor);
             }
 
+            // Place all safety orders upfront if configured
             if (this.dcaConfig.placeSafetyOrdersAtStart) {
                 await this.syncSafetyOrders();
             }
         } catch (error) {
-            console.error('[DCA] Failed to place Base Order:', error);
-            await this.updateBotStatus('error');
+            await this.handleStrategyError(error as Error, 'placeBaseOrder');
         }
     }
 
+    /**
+     * Detect unusual fill velocity (pump protection)
+     * 
+     * Checks if too many orders filled in short time window,
+     * which may indicate a rapid price pump.
+     * 
+     * @returns True if velocity threshold exceeded
+     */
     private detectUnusualVelocity(): boolean {
-        if (this.lastFills.length < 3) return false;
+        if (this.lastFills.length < PUMP_PROTECTION_THRESHOLD) return false;
         const now = Date.now();
-        const recent = this.lastFills.filter(t => now - t < 10000);
-        return recent.length >= 3;
+        const recent = this.lastFills.filter(t => now - t < PUMP_PROTECTION_WINDOW_MS);
+        return recent.length >= PUMP_PROTECTION_THRESHOLD;
     }
 
+    /**
+     * Get current market price
+     * 
+     * @returns Current last price from exchange
+     */
     protected async getCurrentPrice(): Promise<number> {
         const ticker = await this.exchange.getTicker(this.bot.pair);
         return ticker.lastPrice;
     }
 
-    public async cancelAllActiveOrders() {
-        for (const id of this.activeOrders.keys()) {
-            await this.exchange.cancelOrder(id, this.bot.pair).catch(() => { });
+    /**
+     * Get all active orders for this strategy
+     * 
+     * @returns Map of active orders indexed by order ID
+     */
+    protected getActiveOrders(): Map<string, TradeOrder> {
+        return this.activeOrders;
+    }
+
+    /**
+     * Cancel all active orders and clear internal state
+     */
+    public async cancelAllActiveOrders(): Promise<void> {
+        const orders = this.getActiveOrders();
+        for (const [id, order] of orders) {
+            await this.cancelOrderWithRetry(id, order.pair).catch((error) => {
+                console.warn(`[DCA] Failed to cancel order ${id}:`, error?.message);
+            });
         }
         this.activeOrders.clear();
         this.safetyOrderMap.clear();
     }
 
+    /**
+     * Handle real-time price updates
+     * 
+     * Monitors for:
+     * - Entry condition satisfaction (if waiting)
+     * - Take profit (with optional trailing)
+     * - Stop loss (with optional trailing)
+     * - Updates unrealized PnL and performance metrics
+     * 
+     * @param price Current market price
+     */
     async onPriceUpdate(price: number): Promise<void> {
         if (this.isPaused) return;
         this.lastPrice = price;
@@ -224,10 +335,18 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         }
     }
 
+    /**
+     * Manually trigger averaging buy/sell
+     * 
+     * Allows user to manually add to position outside
+     * of automated safety order logic.
+     * 
+     * @param amount Amount of base asset to buy/sell
+     */
     async manualAveragingBuy(amount: number): Promise<void> {
         const side = this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
         try {
-            const order = await this.exchange.createOrder({
+            const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
                 botId: this.bot.id,
                 pair: this.bot.pair,
@@ -237,10 +356,19 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             });
             await this.onOrderFilled(order);
         } catch (error) {
-            console.error('[DCA] Manual Averaging failed:', error);
+            await this.handleStrategyError(error as Error, 'manualAveragingBuy');
         }
     }
 
+    /**
+     * Check if indicator-based condition is met
+     * 
+     * Fetches candles, calculates indicator, and checks signal.
+     * 
+     * @param condition Indicator configuration
+     * @param isEntry Whether checking entry (vs exit) condition
+     * @returns True if condition met
+     */
     protected async checkIndicatorCondition(condition: any, isEntry: boolean = false): Promise<boolean> {
         try {
             const candles = await this.exchange.getCandles(this.bot.pair, condition.timeframe, 100);
@@ -251,17 +379,30 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 : (this.dcaConfig.strategy === 'LONG' ? 'SELL' : 'BUY');
             return signal === expected;
         } catch (error) {
+            console.error('[DCA] Indicator check failed:', error);
             return false;
         }
     }
 
+    /**
+     * Calculate current position PnL percentage
+     * 
+     * @param currentPrice Current market price
+     * @returns PnL as percentage of entry price
+     */
     protected calculatePnL(currentPrice: number): number {
         if (this.avgEntryPrice === 0) return 0;
         const factor = this.dcaConfig.strategy === 'LONG' ? 1 : -1;
         return ((currentPrice - this.avgEntryPrice) / this.avgEntryPrice) * 100 * factor;
     }
 
-    protected async syncSafetyOrders() {
+    /**
+     * Synchronize safety orders on the exchange
+     * 
+     * Places safety orders up to activeOrdersLimit or max total count.
+     * Respects step multiplier and amount multiplier for martingale/anti-martingale.
+     */
+    protected async syncSafetyOrders(): Promise<void> {
         if (this.isPaused) return;
         const maxTotalCount = this.dcaConfig.averagingOrdersQuantity;
         const activeLimit = this.dcaConfig.activeOrdersLimitEnabled ? (this.dcaConfig.activeOrdersLimit || 1) : 1;
@@ -273,20 +414,36 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         }
     }
 
-    protected async placeNextSafetyOrder(index: number) {
+    /**
+     * Place next safety order (averaging order)
+     * 
+     * Calculates price deviation using step multiplier (martingale/anti-martingale).
+     * Calculates order size using amount multiplier.
+     * 
+     * Pauses bot if insufficient funds detected.
+     * 
+     * @param index Safety order index (0-based)
+     */
+    protected async placeNextSafetyOrder(index: number): Promise<void> {
         const baseStep = this.dcaConfig.averagingOrdersStep;
         const stepMult = this.dcaConfig.stepMultiplier || 1.0;
         const amountMult = this.dcaConfig.amountMultiplier || 1.0;
+        
+        // Calculate cumulative price deviation
         let totalDeviation = 0;
         for (let i = 0; i <= index; i++) {
             totalDeviation += baseStep * Math.pow(stepMult, i);
         }
+        
         const initialPrice = this.filledOrders[0]?.price || await this.getCurrentPrice();
         const side = this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
-        const price = side === 'buy' ? initialPrice * (1 - totalDeviation / 100) : initialPrice * (1 + totalDeviation / 100);
+        const price = side === 'buy' 
+            ? initialPrice * (1 - totalDeviation / 100) 
+            : initialPrice * (1 + totalDeviation / 100);
         const currentAmount = this.dcaConfig.averagingOrdersAmount * Math.pow(amountMult, index);
+        
         try {
-            const order = await this.exchange.createOrder({
+            const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
                 botId: this.bot.id,
                 pair: this.bot.pair,
@@ -295,24 +452,41 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 price,
                 amount: currentAmount
             });
+            
             this.activeOrders.set(order.id, order);
             this.safetyOrderMap.set(order.id, index);
         } catch (error: any) {
             console.error(`[DCA] SO ${index} failed:`, error);
+            
+            // Handle insufficient funds by pausing bot
             if (error?.message?.includes('Insufficient funds') || error?.code === 'INSUFFICIENT_FUNDS') {
                 console.warn(`[DCA] Insufficient funds for Safety Order ${index}. Pausing bot.`);
                 await this.pause();
-                // We keep the bot paused so the user can add funds and manually 'Resume'
+            } else {
+                await this.handleStrategyError(error as Error, `placeNextSafetyOrder(${index})`);
             }
         }
     }
 
-    protected async executeExit(reason: string) {
+    /**
+     * Execute position exit
+     * 
+     * Closes entire position at market price.
+     * Updates realized PnL.
+     * Optionally reinvests profit by scaling order sizes.
+     * Resets state and starts new cycle (after optional cooldown).
+     * 
+     * @param reason Exit reason for logging
+     */
+    protected async executeExit(reason: string): Promise<void> {
         console.log(`[DCA] ${reason} triggered. Closing position.`);
         await this.cancelAllActiveOrders();
+        
         const side = this.dcaConfig.strategy === 'LONG' ? 'sell' : 'buy';
+        
         try {
-            const order = await this.exchange.createOrder({
+            // Close position at market
+            const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
                 botId: this.bot.id,
                 pair: this.bot.pair,
@@ -320,11 +494,16 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 type: 'market',
                 amount: this.totalAmountFilled
             });
+            
+            // Calculate realized PnL
             const realizedQuote = order.amount * order.price;
             const factor = this.dcaConfig.strategy === 'LONG' ? 1 : -1;
             const tradePnL = (realizedQuote - this.totalQuoteAssetSpent) * factor;
+            
             this.bot.performance.botProfit += tradePnL;
             this.bot.performance.realizedPnL += tradePnL;
+            
+            // Reinvest profit if enabled
             if (this.dcaConfig.reinvestProfit && tradePnL > 0) {
                 const oldInvestment = (this.config as any).investment;
                 const newInvestment = oldInvestment + tradePnL;
@@ -336,13 +515,15 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 (this.config as any).baseOrderAmount *= scaleFactor;
                 (this.config as any).averagingOrdersAmount *= scaleFactor;
 
-                this.bot.config = this.config; // Sync local bot object
+                this.bot.config = this.config;
 
-                // Persist the updated config (scaled order sizes) to DB
+                // Persist updated config to database
                 await botRepository.update(this.bot.id, this.bot.userId, { config: this.config });
             }
+            
             await this.recordTrade(order);
-            // RESET
+            
+            // Reset state for next cycle
             this.totalAmountFilled = 0;
             this.avgEntryPrice = 0;
             this.totalQuoteAssetSpent = 0;
@@ -351,6 +532,8 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             this.nextSafetyOrderToIndex = 0;
             this.isTrailingTP = false;
             this.currentSLPrice = 0;
+            
+            // Start new cycle after cooldown
             if (this.dcaConfig.cooldownSeconds) {
                 this.isWaitingForEntry = false;
                 setTimeout(() => { this.start(); }, this.dcaConfig.cooldownSeconds * 1000);
@@ -358,20 +541,38 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 await this.start();
             }
         } catch (error) {
-            console.error('[DCA] Exit failed:', error);
+            await this.handleStrategyError(error as Error, 'executeExit');
         }
     }
 
+    /**
+     * Handle order fill event
+     * 
+     * Updates position tracking, average entry price,
+     * and places next safety orders if needed.
+     * 
+     * @param order Filled order details
+     */
     async onOrderFilled(order: TradeOrder): Promise<void> {
         this.activeOrders.delete(order.id);
+        
+        // Track fill timestamps for pump detection
         this.lastFills.push(Date.now());
-        if (this.lastFills.length > 10) this.lastFills.shift();
+        if (this.lastFills.length > MAX_FILL_HISTORY) {
+            this.lastFills.shift();
+        }
+        
+        // Track safety order fills
         if (this.safetyOrderMap.has(order.id)) {
             this.safetyOrderMap.delete(order.id);
             this.safetyOrdersFilledCount++;
         }
+        
         const perf = this.bot.performance;
-        if (order.side === (this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell')) {
+        const isPositionIncreasing = order.side === (this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell');
+        
+        if (isPositionIncreasing) {
+            // Calculate new average entry price
             this.totalQuoteAssetSpent += (order.amount * order.price);
             this.totalAmountFilled += order.amount;
             this.avgEntryPrice = this.totalQuoteAssetSpent / this.totalAmountFilled;
@@ -379,9 +580,17 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         } else {
             perf.baseBalance -= order.amount;
         }
+        
         this.filledOrders.push(order);
-        await this.recordTrade(order);
-        if (this.isPaused) return;
-        await this.syncSafetyOrders();
+        
+        try {
+            await this.recordTrade(order);
+            
+            if (!this.isPaused) {
+                await this.syncSafetyOrders();
+            }
+        } catch (error) {
+            await this.handleStrategyError(error as Error, 'onOrderFilled');
+        }
     }
 }

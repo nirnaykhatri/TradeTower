@@ -1,16 +1,50 @@
 import { BaseStrategy } from './BaseStrategy';
 import { LoopConfig } from '../types/strategyConfig';
 import { TradeOrder } from '@trading-tower/shared';
+import { PRICE_TOLERANCE } from '../constants/strategy.constants';
 
+/**
+ * Loop Strategy (Recurring Buy/Sell Grid)
+ * 
+ * Implements a recurring trading loop that continuously buys at lower prices
+ * and sells at higher prices within a defined range. The strategy divides
+ * capital into multiple orders placed at regular intervals below the market.
+ * 
+ * When a buy order fills, a corresponding sell order is placed at a target
+ * profit level. Once the sell completes, the loop repeats by placing a new
+ * buy order at the same price, effectively creating a cycle.
+ * 
+ * Key Features:
+ * - Fixed-range grid-based buy orders
+ * - Individual profit targets per buy
+ * - Reinvestment option to compound profits
+ * - Continuous cycling until manual stop
+ */
 export class LoopStrategy extends BaseStrategy<LoopConfig> {
     private activeOrders: Map<string, TradeOrder> = new Map();
     // Maps SellOrder ID -> Original Buy Price (to recreate the loop)
     private orderMap: Map<string, number> = new Map();
 
+    /**
+     * Get active orders currently managed by this strategy
+     * @returns Map of active orders indexed by order ID
+     */
+    getActiveOrders(): Map<string, TradeOrder> {
+        return this.activeOrders;
+    }
+
+    /**
+     * Initialize the Loop strategy
+     * @returns Promise<void>
+     */
     async initialize(): Promise<void> {
         console.log(`[LoopBot] Initialized for ${this.bot.pair}`);
     }
 
+    /**
+     * Start the loop strategy by placing initial grid of buy orders
+     * @returns Promise<void>
+     */
     async start(): Promise<void> {
         await this.updateBotStatus('running');
         const ticker = await this.exchange.getTicker(this.bot.pair);
@@ -30,10 +64,16 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
         }
     }
 
-    private async placeBuy(price: number, amount: number) {
+    /**
+     * Place a buy order at the specified price and amount
+     * @param price Order price
+     * @param amount Order amount
+     * @returns Promise<void>
+     */
+    private async placeBuy(price: number, amount: number): Promise<void> {
         if (this.isPaused) return;
         try {
-            const order = await this.exchange.createOrder({
+            const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
                 botId: this.bot.id,
                 pair: this.bot.pair,
@@ -44,17 +84,22 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
             });
             this.activeOrders.set(order.id, order);
         } catch (e) {
-            console.error(`[LoopBot] Failed to place buy at ${price}:`, e);
+            await this.handleStrategyError(e as Error, 'placeBuy');
         }
     }
 
-    private async placeSell(buyOrder: TradeOrder) {
+    /**
+     * Place a sell order for the corresponding buy order at profit target
+     * @param buyOrder The buy order to pair with sell
+     * @returns Promise<void>
+     */
+    private async placeSell(buyOrder: TradeOrder): Promise<void> {
         if (this.isPaused) return;
         const tpMultiplier = 1 + (this.config.takeProfit || 1) / 100;
         const sellPrice = buyOrder.price * tpMultiplier;
 
         try {
-            const order = await this.exchange.createOrder({
+            const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
                 botId: this.bot.id,
                 pair: this.bot.pair,
@@ -66,18 +111,29 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
             this.activeOrders.set(order.id, order);
             this.orderMap.set(order.id, buyOrder.price);
         } catch (e) {
-            console.error(`[LoopBot] Failed to place sell at ${sellPrice}:`, e);
+            await this.handleStrategyError(e as Error, 'placeSell');
         }
     }
 
-    protected async cancelAllActiveOrders() {
+    /**
+     * Cancel all active orders and clear tracking maps
+     * @returns Promise<void>
+     */
+    protected async cancelAllActiveOrders(): Promise<void> {
         for (const id of this.activeOrders.keys()) {
-            await this.exchange.cancelOrder(id, this.bot.pair).catch(() => { });
+            await this.cancelOrderWithRetry(id, this.bot.pair).catch(() => { });
         }
         this.activeOrders.clear();
         this.orderMap.clear();
     }
 
+    /**
+     * Handle price update events
+     * Current implementation updates last price for monitoring
+     * 
+     * @param price Current market price
+     * @returns Promise<void>
+     */
     async onPriceUpdate(price: number): Promise<void> {
         this.lastPrice = price;
         // Trailing Up Logic (Simulated for Loop)
@@ -86,6 +142,13 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
         // We will stick to the core "Buy Low -> Sell High -> Re-Buy Low" loop.
     }
 
+    /**
+     * Handle order filled events with profit calculation and loop cycling
+     * Updates performance metrics and creates the next order in the loop cycle
+     * 
+     * @param order The filled TradeOrder
+     * @returns Promise<void>
+     */
     async onOrderFilled(order: TradeOrder): Promise<void> {
         this.activeOrders.delete(order.id);
         const profit = this.calculateTradeProfit(order);
@@ -133,6 +196,11 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
         }
     }
 
+    /**
+     * Calculate profit for a sell order based on original buy price
+     * @param order The sell order to calculate profit for
+     * @returns Profit amount in quote currency
+     */
     private calculateTradeProfit(order: TradeOrder): number {
         if (order.side === 'buy') return 0;
         const buyPrice = this.orderMap.get(order.id);

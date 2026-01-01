@@ -8,33 +8,81 @@ export interface CandleData {
     volume: number[];
 }
 
+/**
+ * Configuration for indicator calculations
+ */
+export interface IndicatorConfig {
+    rsiPeriod?: number;
+    macdFastPeriod?: number;
+    macdSlowPeriod?: number;
+    macdSignalPeriod?: number;
+    stochasticPeriod?: number;
+    stochasticSignalPeriod?: number;
+    oversold?: number;
+    overbought?: number;
+}
+
+/**
+ * Service for calculating technical indicators
+ * Supports dependency injection pattern
+ */
 export class IndicatorService {
-    private static instance: IndicatorService;
+    private readonly defaultConfig: IndicatorConfig = {
+        rsiPeriod: 14,
+        macdFastPeriod: 12,
+        macdSlowPeriod: 26,
+        macdSignalPeriod: 9,
+        stochasticPeriod: 14,
+        stochasticSignalPeriod: 3,
+        oversold: 30,
+        overbought: 70
+    };
 
-    private constructor() { }
-
-    public static getInstance(): IndicatorService {
-        if (!IndicatorService.instance) {
-            IndicatorService.instance = new IndicatorService();
-        }
-        return IndicatorService.instance;
+    /**
+     * Creates a new IndicatorService instance
+     * @param config Optional configuration overrides
+     */
+    constructor(private config: IndicatorConfig = {}) {
+        this.config = { ...this.defaultConfig, ...config };
     }
 
-    public calculateRSI(values: number[], period: number = 14): number[] {
+    /**
+     * Calculate RSI (Relative Strength Index)
+     * @param values Price values array
+     * @param period Optional period override
+     * @returns Array of RSI values
+     */
+    public calculateRSI(values: number[], period?: number): number[] {
         try {
-            return RSI.calculate({ period, values });
+            return RSI.calculate({
+                period: period || this.config.rsiPeriod!,
+                values
+            });
         } catch (error) {
             console.error('Error calculating RSI', error);
             return [];
         }
     }
 
-    public calculateMACD(values: number[], fastPeriod: number = 12, slowPeriod: number = 26, signalPeriod: number = 9) {
+    /**
+     * Calculate MACD (Moving Average Convergence Divergence)
+     * @param values Price values array
+     * @param fastPeriod Optional fast period override
+     * @param slowPeriod Optional slow period override
+     * @param signalPeriod Optional signal period override
+     * @returns Array of MACD results
+     */
+    public calculateMACD(
+        values: number[],
+        fastPeriod?: number,
+        slowPeriod?: number,
+        signalPeriod?: number
+    ) {
         try {
             return MACD.calculate({
-                fastPeriod,
-                slowPeriod,
-                signalPeriod,
+                fastPeriod: fastPeriod || this.config.macdFastPeriod!,
+                slowPeriod: slowPeriod || this.config.macdSlowPeriod!,
+                signalPeriod: signalPeriod || this.config.macdSignalPeriod!,
                 values,
                 SimpleMAOscillator: false,
                 SimpleMASignal: false
@@ -45,11 +93,26 @@ export class IndicatorService {
         }
     }
 
-    public calculateStochastic(high: number[], low: number[], close: number[], period: number = 14, signalPeriod: number = 3) {
+    /**
+     * Calculate Stochastic Oscillator
+     * @param high High prices array
+     * @param low Low prices array
+     * @param close Close prices array
+     * @param period Optional period override
+     * @param signalPeriod Optional signal period override
+     * @returns Array of Stochastic results
+     */
+    public calculateStochastic(
+        high: number[],
+        low: number[],
+        close: number[],
+        period?: number,
+        signalPeriod?: number
+    ) {
         try {
             return Stochastic.calculate({
-                period,
-                signalPeriod,
+                period: period || this.config.stochasticPeriod!,
+                signalPeriod: signalPeriod || this.config.stochasticSignalPeriod!,
                 high,
                 low,
                 close
@@ -60,15 +123,27 @@ export class IndicatorService {
         }
     }
 
-    public generateSignal(type: 'RSI' | 'MACD' | 'Stochastic', values: any[], config: any = {}): 'BUY' | 'SELL' | 'NEUTRAL' {
+    /**
+     * Generate trading signal from indicator values
+     * @param type Indicator type
+     * @param values Indicator values
+     * @param config Optional configuration overrides
+     * @returns Trading signal: 'BUY', 'SELL', or 'NEUTRAL'
+     */
+    public generateSignal(
+        type: 'RSI' | 'MACD' | 'Stochastic',
+        values: any[],
+        config: Partial<IndicatorConfig> = {}
+    ): 'BUY' | 'SELL' | 'NEUTRAL' {
         if (values.length === 0) return 'NEUTRAL';
 
+        const mergedConfig = { ...this.config, ...config };
         const latest = values[values.length - 1];
 
         if (type === 'RSI') {
             const rsiVal = latest as number;
-            const oversold = config.oversold || 30;
-            const overbought = config.overbought || 70;
+            const oversold = mergedConfig.oversold!;
+            const overbought = mergedConfig.overbought!;
             if (rsiVal < oversold) return 'BUY';
             if (rsiVal > overbought) return 'SELL';
         }
@@ -89,8 +164,8 @@ export class IndicatorService {
 
         if (type === 'Stochastic') {
             const stochVal = latest as { k: number; d: number };
-            const oversold = config.oversold || 20;
-            const overbought = config.overbought || 80;
+            const oversold = mergedConfig.oversold || 20;
+            const overbought = mergedConfig.overbought || 80;
 
             if (stochVal.k < oversold && stochVal.d < oversold && stochVal.k > stochVal.d) return 'BUY';
             if (stochVal.k > overbought && stochVal.d > overbought && stochVal.k < stochVal.d) return 'SELL';
@@ -100,4 +175,8 @@ export class IndicatorService {
     }
 }
 
-export const indicatorService = IndicatorService.getInstance();
+/**
+ * Default indicator service instance
+ * Can be replaced with custom configuration via dependency injection
+ */
+export const indicatorService = new IndicatorService();

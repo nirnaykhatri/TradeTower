@@ -1,25 +1,50 @@
 import { DCAFuturesStrategy } from './DCAFuturesStrategy';
 import { ComboConfig } from '../types/strategyConfig';
 import { TradeOrder } from '@trading-tower/shared';
+import { PRICE_TOLERANCE } from '../constants/strategy.constants';
 
 /**
- * Combo Bot (DCA Entry + Grid Exit)
+ * Combo Bot Strategy (DCA Entry + Grid Exit)
+ * 
  * Extends DCA Futures to use Martingale/Safety Orders for entry (averaging down),
  * but uses a Grid of Limit Orders for profit taking (distributing exit).
+ * 
+ * This strategy accumulates position using DCA methodology with progressively
+ * larger buy orders (safety orders) as price decreases, then exits through
+ * a calculated grid of limit sell orders for systematic profit taking.
+ * 
+ * Key Features:
+ * - DCA-based entry with safety orders
+ * - Grid-based exit with multiple profit levels
+ * - Automatic grid recalculation on each entry
+ * - Proper cleanup on exit events
  */
 export class ComboStrategy extends DCAFuturesStrategy {
     private profitGridOrders: Map<string, TradeOrder> = new Map();
+
+    /**
+     * Get active orders currently managed by this strategy
+     * @returns Map of active orders indexed by order ID
+     */
+    getActiveOrders(): Map<string, TradeOrder> {
+        const combined = new Map<string, TradeOrder>(super.getActiveOrders());
+        for (const [id, order] of this.profitGridOrders) {
+            combined.set(id, order);
+        }
+        return combined;
+    }
 
     protected get comboConfig(): ComboConfig {
         return this.config as unknown as ComboConfig;
     }
 
     /**
-     * Override onOrderFilled to manage the Profit Grid.
+     * Handle order filled event with profit grid management.
      * When we buy (Base or Safety), we update the Sell Grid.
-     * When we sell (Grid Hit), we record profit and potentially replenish?
-     * Bitsgap Combo usually just exits. But if it's "Grid", maybe it scalps?
-     * For now, standard Combo is: Accumulate via DCA, Sell off via Grid.
+     * When we sell (Grid Hit), we record profit.
+     * 
+     * @param order The filled TradeOrder
+     * @returns Promise<void>
      */
     async onOrderFilled(order: TradeOrder): Promise<void> {
         // 1. Let DCA strategy handle the entry side (updating avgPrice, safety orders count)
@@ -50,56 +75,66 @@ export class ComboStrategy extends DCAFuturesStrategy {
 
     /**
      * Places a grid of Limit Close orders above the current Average Entry.
+     * Cancels existing grid orders and places new ones based on position size.
+     * 
+     * @returns Promise<void>
      */
-    private async placeProfitGrid() {
-        // 1. Cancel existing grid
-        for (const [id, order] of this.profitGridOrders) {
-            try {
-                await this.exchange.cancelOrder(id, this.bot.pair);
-            } catch (e) {
-                // Ignore if already filled/gone
+    private async placeProfitGrid(): Promise<void> {
+        try {
+            // 1. Cancel existing grid
+            for (const id of this.profitGridOrders.keys()) {
+                try {
+                    await this.cancelOrderWithRetry(id, this.bot.pair);
+                } catch (e) {
+                    // Ignore if already filled/gone
+                }
             }
-        }
-        this.profitGridOrders.clear();
+            this.profitGridOrders.clear();
 
-        const totalPos = this.totalAmountFilled; // From BaseDCAStrategy
-        if (totalPos <= 0) return;
+            const totalPos = this.totalAmountFilled; // From BaseDCAStrategy
+            if (totalPos <= 0) return;
 
-        const { gridLevels, gridStep, strategy } = this.comboConfig;
+            const { gridLevels, gridStep, strategy } = this.comboConfig;
 
-        // Amount per grid level (simple distribution)
-        const amountPerLevel = totalPos / gridLevels;
+            // Amount per grid level (simple distribution)
+            const amountPerLevel = totalPos / gridLevels;
 
-        // Distance calculation
-        const startPrice = this.avgEntryPrice;
-        const factor = strategy === 'LONG' ? 1 : -1;
+            // Distance calculation
+            const startPrice = this.avgEntryPrice;
+            const factor = strategy === 'LONG' ? 1 : -1;
 
-        for (let i = 1; i <= gridLevels; i++) {
-            const priceReq = startPrice * (1 + (gridStep * i / 100) * factor);
-            const side = strategy === 'LONG' ? 'sell' : 'buy';
+            for (let i = 1; i <= gridLevels; i++) {
+                const priceReq = startPrice * (1 + (gridStep * i / 100) * factor);
+                const side = strategy === 'LONG' ? 'sell' : 'buy';
 
-            try {
-                const order = await this.exchange.createOrder({
-                    userId: this.bot.userId,
-                    botId: this.bot.id,
-                    pair: this.bot.pair,
-                    side,
-                    type: 'limit',
-                    price: priceReq,
-                    amount: amountPerLevel,
-                    reduceOnly: true // Important for Futures Exit
-                });
-                this.profitGridOrders.set(order.id, order);
-            } catch (e) {
-                console.error(`[Combo] Failed to place profit grid level ${i}:`, e);
+                try {
+                    const order = await this.executeOrderWithRetry({
+                        userId: this.bot.userId,
+                        botId: this.bot.id,
+                        pair: this.bot.pair,
+                        side,
+                        type: 'limit',
+                        price: priceReq,
+                        amount: amountPerLevel
+                    });
+                    this.profitGridOrders.set(order.id, order);
+                } catch (e) {
+                    console.error(`[Combo] Failed to place profit grid level ${i}:`, e);
+                }
             }
+        } catch (error) {
+            await this.handleStrategyError(error as Error, 'placeProfitGrid');
         }
     }
 
     /**
-     * Override executeExit to ensure we protect our Grid state if panic sell happens
+     * Override executeExit to ensure we protect our Grid state if panic sell happens.
+     * Clears profit grid orders on exit.
+     * 
+     * @param reason Reason for exit
+     * @returns Promise<void>
      */
-    protected async executeExit(reason: string) {
+    protected async executeExit(reason: string): Promise<void> {
         // If standard DCA wants to exit (e.g. Stop Loss), we let it.
         // It calls cancelAllActiveOrders.
         await super.executeExit(reason);

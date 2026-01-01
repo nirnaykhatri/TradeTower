@@ -68,9 +68,9 @@ export class PerformanceController {
                 status: 'success',
                 data: {
                     botId,
-                    currentPnL: bot.totalPnL,
-                    totalTrades: bot.totalTrades,
-                    winRate: bot.winRate,
+                    currentPnL: bot.performance?.totalPnL || 0,
+                    totalTrades: bot.performance?.totalTrades || 0,
+                    winRate: bot.performance?.winRate || 0,
                     history
                 }
             });

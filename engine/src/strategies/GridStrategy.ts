@@ -1,7 +1,18 @@
 import { BaseStrategy, ExitMode } from './BaseStrategy';
 import { GridConfig } from '../types/strategyConfig';
-import { TradeOrder } from '@trading-tower/shared';
+import { TradeOrder, validateGridConfig } from '@trading-tower/shared';
+import {
+    PRICE_TOLERANCE,
+    MAX_FILL_HISTORY,
+    PUMP_PROTECTION_THRESHOLD,
+    PUMP_PROTECTION_WINDOW_MS
+} from '../constants/strategy.constants';
 
+/**
+ * Grid Trading Strategy
+ * Places buy and sell orders at fixed price intervals (grid levels)
+ * Profits from price oscillation within a range
+ */
 export class GridStrategy extends BaseStrategy<GridConfig> {
     private gridLevels: number[] = [];
     private buyOrders: Map<string, TradeOrder> = new Map();
@@ -9,9 +20,7 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
     private currentLowPrice: number;
     private currentHighPrice: number;
     private gridStepValue: number = 0;
-
-    private avgCostBasis: number = 0;
-    private lastFills: number[] = []; // To track pump/dump velocity
+    private lastFills: number[] = [];
 
     constructor(bot: any, exchange: any, config: GridConfig) {
         super(bot, exchange, config);
@@ -19,7 +28,11 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
         this.currentHighPrice = config.highPrice;
     }
 
+    /**
+     * Initialize grid strategy - validates config and calculates grid levels
+     */
     async initialize(): Promise<void> {
+        validateGridConfig(this.config);
         this.calculateGrid();
     }
 
@@ -83,20 +96,32 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
         }
     }
 
+    /**
+     * Detect unusual market velocity (pump protection)
+     * @returns true if too many fills occurred in short time window
+     */
     private detectUnusualVelocity(): boolean {
-        if (this.lastFills.length < 3) return false;
+        if (this.lastFills.length < PUMP_PROTECTION_THRESHOLD) return false;
         const now = Date.now();
-        const recentFills = this.lastFills.filter(t => now - t < 5000); // 3 fills in 5 seconds
-        return recentFills.length >= 3;
+        const recentFills = this.lastFills.filter(t => now - t < PUMP_PROTECTION_WINDOW_MS);
+        return recentFills.length >= PUMP_PROTECTION_THRESHOLD;
     }
 
-    protected async cancelAllActiveOrders() {
-        const allOrders = [...this.buyOrders.values(), ...this.sellOrders.values()];
-        for (const order of allOrders) {
-            try {
-                await this.exchange.cancelOrder(order.id, this.bot.pair).catch(() => { });
-            } catch (e) { }
-        }
+    /**
+     * Get all active orders for cancellation
+     */
+    protected getActiveOrders(): Map<string, TradeOrder> {
+        const allOrders = new Map<string, TradeOrder>();
+        this.buyOrders.forEach((order, id) => allOrders.set(id, order));
+        this.sellOrders.forEach((order, id) => allOrders.set(id, order));
+        return allOrders;
+    }
+
+    /**
+     * Override to clear local order maps after base class cancellation
+     */
+    protected async cancelAllActiveOrders(): Promise<void> {
+        await super.cancelAllActiveOrders();
         this.buyOrders.clear();
         this.sellOrders.clear();
     }
@@ -129,20 +154,6 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
         }
     }
 
-    private updatePerformanceMetrics(currentPrice: number) {
-        const perf = this.bot.performance;
-
-        if (perf.baseBalance > 0) {
-            perf.unrealizedPnL = (currentPrice - this.avgCostBasis) * perf.baseBalance;
-        } else {
-            perf.unrealizedPnL = 0;
-        }
-
-        perf.totalPnL = perf.botProfit + perf.unrealizedPnL;
-        perf.totalPnLPercent = (perf.totalPnL / perf.initialInvestment) * 100;
-        perf.annualizedReturn = this.calculateAnnualizedReturn();
-    }
-
     /**
      * Professional Increase Investment (Bitsgap Style)
      * Adds quote funds and re-allocates order sizes across the grid.
@@ -161,24 +172,28 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
         await this.placeInitialOrders(ticker.lastPrice);
     }
 
+    /**
+     * Handle trailing up - shifts grid range upward
+     * Cancels lowest buy order and places new sell order at top
+     */
     private async handleTrailingUp() {
         this.gridLevels.sort((a, b) => a - b);
         const lowestLevel = this.gridLevels[0];
 
         let lowestOrder: TradeOrder | null = null;
         for (const order of this.buyOrders.values()) {
-            if (Math.abs(order.price - lowestLevel) / lowestLevel < 0.001) {
+            if (Math.abs(order.price - lowestLevel) / lowestLevel < PRICE_TOLERANCE) {
                 lowestOrder = order;
                 break;
             }
         }
 
         if (lowestOrder) {
-            await this.exchange.cancelOrder(lowestOrder.id, this.bot.pair).catch(() => { });
+            await this.cancelOrderWithRetry(lowestOrder.id, this.bot.pair);
             this.buyOrders.delete(lowestOrder.id);
 
             try {
-                const fill = await this.exchange.createOrder({
+                const fill = await this.executeOrderWithRetry({
                     userId: this.bot.userId,
                     botId: this.bot.id,
                     pair: this.bot.pair,
@@ -187,7 +202,9 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
                     amount: lowestOrder.amount
                 });
                 await this.onOrderFilled(fill);
-            } catch (e) { }
+            } catch (error) {
+                await this.handleStrategyError(error as Error, 'trailingUp market buy');
+            }
         }
 
         this.gridLevels.shift();
@@ -201,24 +218,28 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
         await this.placeOrder('sell', newHigh, investmentPerLevel / newHigh);
     }
 
+    /**
+     * Handle trailing down - shifts grid range downward
+     * Cancels highest sell order and places new buy order at bottom
+     */
     private async handleTrailingDown() {
         this.gridLevels.sort((a, b) => a - b);
         const highestLevel = this.gridLevels[this.gridLevels.length - 1];
 
         let highestOrder: TradeOrder | null = null;
         for (const order of this.sellOrders.values()) {
-            if (Math.abs(order.price - highestLevel) / highestLevel < 0.001) {
+            if (Math.abs(order.price - highestLevel) / highestLevel < PRICE_TOLERANCE) {
                 highestOrder = order;
                 break;
             }
         }
 
         if (highestOrder) {
-            await this.exchange.cancelOrder(highestOrder.id, this.bot.pair).catch(() => { });
+            await this.cancelOrderWithRetry(highestOrder.id, this.bot.pair);
             this.sellOrders.delete(highestOrder.id);
 
             try {
-                const fill = await this.exchange.createOrder({
+                const fill = await this.executeOrderWithRetry({
                     userId: this.bot.userId,
                     botId: this.bot.id,
                     pair: this.bot.pair,
@@ -227,7 +248,9 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
                     amount: highestOrder.amount
                 });
                 await this.onOrderFilled(fill);
-            } catch (e) { }
+            } catch (error) {
+                await this.handleStrategyError(error as Error, 'trailingDown market sell');
+            }
         }
 
         this.gridLevels.pop();
@@ -241,11 +264,16 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
         await this.placeOrder('buy', newLow, investmentPerLevel / newLow);
     }
 
+    /**
+     * Handle order filled event
+     * Updates balances, calculates profits, and places counter orders
+     * @param order The filled order
+     */
     async onOrderFilled(order: TradeOrder): Promise<void> {
         this.buyOrders.delete(order.id);
         this.sellOrders.delete(order.id);
         this.lastFills.push(Date.now());
-        if (this.lastFills.length > 10) this.lastFills.shift();
+        if (this.lastFills.length > MAX_FILL_HISTORY) this.lastFills.shift();
 
         const perf = this.bot.performance;
 
@@ -255,7 +283,7 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
             perf.quoteBalance -= (order.amount * order.price);
             this.avgCostBasis = totalCost / (perf.baseBalance || 1);
         } else {
-            const gridIndex = this.gridLevels.findIndex(p => Math.abs(p - order.price) / p < 0.001);
+            const gridIndex = this.gridLevels.findIndex(p => Math.abs(p - order.price) / p < PRICE_TOLERANCE);
             if (gridIndex > 0) {
                 const buyLevelPrice = this.gridLevels[gridIndex - 1];
                 const profit = (order.price - buyLevelPrice) * order.amount;
@@ -271,7 +299,7 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
 
         if (this.isPaused) return;
 
-        const gridIndex = this.gridLevels.findIndex(p => Math.abs(p - order.price) / p < 0.001);
+        const gridIndex = this.gridLevels.findIndex(p => Math.abs(p - order.price) / p < PRICE_TOLERANCE);
         if (gridIndex === -1) return;
 
         if (order.side === 'buy') {

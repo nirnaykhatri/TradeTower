@@ -1,10 +1,14 @@
 import { BotInstance } from '../index';
 import { BaseRepository } from './BaseRepository';
+import { DatabaseService } from './CosmosService';
 
 export class BotRepository extends BaseRepository<BotInstance> {
-    constructor() {
-        super('Bots');
+    constructor(dbService: DatabaseService) {
+        super('Bots', dbService);
     }
 }
 
-export const botRepository = new BotRepository();
+// Factory function to create repository with default service
+export function createBotRepository(dbService: DatabaseService): BotRepository {
+    return new BotRepository(dbService);
+}

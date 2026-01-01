@@ -1,5 +1,5 @@
 import { IExchangeConnector, ExchangeBalance, TickerData } from '../interfaces/IExchangeConnector';
-import { TradeOrder } from '@trading-tower/shared';
+import { TradeOrder, RateLimiter, ExchangeRateLimiters } from '@trading-tower/shared';
 import { BaseCoinbaseConnector } from './BaseCoinbaseConnector';
 
 export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchangeConnector {
@@ -8,11 +8,15 @@ export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchang
 
     constructor(apiKey: string, apiSecret: string) {
         super(apiKey, apiSecret, 'Coinbase');
+        // Initialize rate limiter for Coinbase API
+        this.rateLimiter = ExchangeRateLimiters.COINBASE;
     }
 
     async ping(): Promise<boolean> {
         try {
-            await this.client.get('/api/v3/brokerage/accounts?limit=1');
+            await this.rateLimiter.execute(() =>
+                this.client.get('/api/v3/brokerage/accounts?limit=1')
+            );
             return true;
         } catch {
             return false;
@@ -20,7 +24,9 @@ export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchang
     }
 
     async getBalances(): Promise<ExchangeBalance[]> {
-        const response = await this.client.get('/api/v3/brokerage/accounts');
+        const response = await this.rateLimiter.execute(() =>
+            this.client.get('/api/v3/brokerage/accounts')
+        );
         return response.data.accounts.map((acc: any) => ({
             asset: acc.currency,
             free: parseFloat(acc.available_balance.value),
@@ -28,9 +34,19 @@ export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchang
         }));
     }
 
+    /**
+     * Get ticker data for trading pair
+     * 
+     * Rate limited to prevent exceeding Coinbase API limits.
+     * 
+     * @param symbol Trading pair symbol (e.g., 'BTC/USD')
+     * @returns Ticker data with price, bid/ask, volume
+     */
     async getTicker(symbol: string): Promise<TickerData> {
         const productId = symbol.replace('/', '-').toUpperCase();
-        const response = await this.client.get(`/api/v3/brokerage/products/${productId}`);
+        const response = await this.rateLimiter.execute(() =>
+            this.client.get(`/api/v3/brokerage/products/${productId}`)
+        );
         const product = response.data;
 
         return {
@@ -43,16 +59,37 @@ export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchang
         };
     }
 
+    /**
+     * Get historical candles/OHLCV data
+     * 
+     * Rate limited to prevent exceeding API limits.
+     * 
+     * @param symbol Trading pair symbol
+     * @param interval Candle interval (e.g., '1h', '4h')
+     * @param limit Number of candles to fetch
+     * @returns Array of OHLCV candles
+     */
     async getCandles(symbol: string, interval: string, limit: number = 100): Promise<any[]> {
         const productId = symbol.replace('/', '-').toUpperCase();
         const end = Math.floor(Date.now() / 1000);
         const start = end - (limit * 60);
-        const response = await this.client.get(`/api/v3/brokerage/products/${productId}/candles`, {
+        const response = await this.rateLimiter.execute(() =>
+            this.client.get(`/api/v3/brokerage/products/${productId}/candles`, {
             params: { start, end, granularity: interval }
-        });
+        })
+        );
         return response.data.candles;
     }
 
+    /**
+     * Create a new order on Coinbase
+     * 
+     * Rate limited to prevent hitting API limits.
+     * Supports market and limit orders.
+     * 
+     * @param order Order specification
+     * @returns Created order details
+     */
     async createOrder(order: Partial<TradeOrder>): Promise<TradeOrder> {
         const productId = (order.pair || '').replace('/', '-').toUpperCase();
 
@@ -72,7 +109,9 @@ export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchang
             }
         };
 
-        const response = await this.client.post('/api/v3/brokerage/orders', body);
+        const response = await this.rateLimiter.execute(() =>
+            this.client.post('/api/v3/brokerage/orders', body)
+        );
         const res = response.data.order;
 
         return {
@@ -93,13 +132,35 @@ export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchang
         };
     }
 
+    /**
+     * Cancel an open order
+     * 
+     * Rate limited to prevent exceeding API limits.
+     * 
+     * @param orderId Order ID to cancel
+     * @param symbol Trading pair symbol
+     * @returns True if cancellation successful
+     */
     async cancelOrder(orderId: string, symbol: string): Promise<boolean> {
-        await this.client.post('/api/v3/brokerage/orders/batch_cancel', { order_ids: [orderId] });
+        await this.rateLimiter.execute(() =>
+            this.client.post('/api/v3/brokerage/orders/batch_cancel', { order_ids: [orderId] })
+        );
         return true;
     }
 
+    /**
+     * Get order details
+     * 
+     * Rate limited to prevent exceeding API limits.
+     * 
+     * @param orderId Order ID to retrieve
+     * @param symbol Trading pair symbol
+     * @returns Order details
+     */
     async getOrder(orderId: string, symbol: string): Promise<TradeOrder> {
-        const response = await this.client.get(`/api/v3/brokerage/orders/historical/${orderId}`);
+        const response = await this.rateLimiter.execute(() =>
+            this.client.get(`/api/v3/brokerage/orders/historical/${orderId}`)
+        );
         const res = response.data.order;
 
         return {
