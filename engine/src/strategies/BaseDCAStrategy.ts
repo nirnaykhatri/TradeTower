@@ -269,6 +269,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         if (this.totalAmountFilled === 0) return;
 
         const currentPnL = this.calculatePnL(price);
+        const feePctBuffer = this.feeBuffer * 100 * 2; // round-trip fee allowance
 
         const perf = this.bot.performance;
         const factor = this.dcaConfig.strategy === 'LONG' ? 1 : -1;
@@ -289,7 +290,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         if (currentDrawdown > perf.drawdown) perf.drawdown = currentDrawdown;
 
         if (this.dcaConfig.trailingTP && this.dcaConfig.takeProfitPercent) {
-            const tpThreshold = this.dcaConfig.takeProfitPercent;
+            const tpThreshold = this.dcaConfig.takeProfitPercent + feePctBuffer;
             if (!this.isTrailingTP && currentPnL >= tpThreshold) {
                 this.isTrailingTP = true;
                 this.trailingTPPrice = price;
@@ -305,7 +306,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                     return;
                 }
             }
-        } else if (this.dcaConfig.takeProfitPercent && currentPnL >= this.dcaConfig.takeProfitPercent) {
+        } else if (this.dcaConfig.takeProfitPercent && currentPnL >= (this.dcaConfig.takeProfitPercent + feePctBuffer)) {
             let canExit = true;
             if (this.dcaConfig.takeProfitCondition) {
                 canExit = await this.checkIndicatorCondition(this.dcaConfig.takeProfitCondition);
@@ -499,9 +500,11 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             const realizedQuote = order.amount * order.price;
             const factor = this.dcaConfig.strategy === 'LONG' ? 1 : -1;
             const tradePnL = (realizedQuote - this.totalQuoteAssetSpent) * factor;
+
+            order.profit = tradePnL;
+            order.fee = order.fee ?? 0;
             
             this.bot.performance.botProfit += tradePnL;
-            this.bot.performance.realizedPnL += tradePnL;
             
             // Reinvest profit if enabled
             if (this.dcaConfig.reinvestProfit && tradePnL > 0) {

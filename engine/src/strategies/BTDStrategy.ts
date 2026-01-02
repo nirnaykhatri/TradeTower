@@ -120,6 +120,9 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
      */
     protected async placeOrder(side: 'buy' | 'sell', price: number, amount: number): Promise<void> {
         if (this.isPaused) return;
+        const adjustedPrice = side === 'buy'
+            ? price * (1 - this.feeBuffer)
+            : price * (1 + this.feeBuffer);
 
         try {
             const order = await this.executeOrderWithRetry({
@@ -128,7 +131,7 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
                 pair: this.bot.pair,
                 side,
                 type: 'limit',
-                price,
+                price: adjustedPrice,
                 amount
             });
             this.activeOrders.set(order.id, order);
@@ -286,10 +289,12 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
                     const buyPrice = this.gridLevels[gridIndex - 1];
                     
                     // Calculate profit for this dip-rebound cycle
-                    const profit = (order.price - buyPrice) * order.amount;
+                    const grossProfit = (order.price - buyPrice) * order.amount;
+                    const feeCost = (order.price + buyPrice) * order.amount * this.feeBuffer; // approx round trip
+                    const profit = grossProfit - feeCost;
                     if (profit > 0) {
                         this.bot.performance.botProfit += profit;
-                        this.bot.performance.realizedPnL += profit;
+                        order.profit = profit;
                     }
 
                     await this.placeOrder('buy', buyPrice, order.amount);

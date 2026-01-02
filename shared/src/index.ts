@@ -16,8 +16,8 @@ export interface BotPerformance {
     totalPnL: number;        // Total profit in quote currency
     totalPnLPercent: number; // Growth relative to initial investment
     botProfit: number;       // Profit from completed grid cycles/trades
-    realizedPnL: number;     // Profit from closed positions
     unrealizedPnL: number;   // Current value of held assets vs cost (Value Change)
+    baseQuoteRatio?: number; // Allocation ratio: base value / (base+quote)
     annualizedReturn: number;// Estimated yearly return %
     drawdown: number;        // Max drop from peak
     totalTrades: number;
@@ -26,6 +26,11 @@ export interface BotPerformance {
     quoteBalance: number;    // Amount of quote asset currently held by bot
     initialInvestment: number;
     initialPrice: number;    // Price when bot started
+
+    // Trading Duration (per Bitsgap analyzing performance spec)
+    tradingStartTime?: string; // ISO timestamp when bot started trading
+    tradingDurationHours?: number; // Total hours bot has been trading
+    tradingDurationDays?: number; // Total days bot has been trading
 
     // DCA Specific (can be used by other strategies partially)
     avgEntryPrice?: number;
@@ -38,6 +43,8 @@ export interface BotPerformance {
     marginRatio?: number;
     activeMargin?: number;
 }
+
+export type BotClosureStrategy = 'CLOSE_POSITIONS' | 'CANCEL_ORDERS' | 'LIQUIDATE';
 
 export interface BotInstance {
     id: string; // Unique bot ID
@@ -54,6 +61,8 @@ export interface BotInstance {
     // Performance metrics
     performance: BotPerformance;
 
+    // Closure strategy configuration
+    closureStrategy?: BotClosureStrategy; // Strategy to use when stopping bot
     lastExecutionAt?: string;
     createdAt: string;
     updatedAt: string;
@@ -76,6 +85,7 @@ export interface TradeOrder {
     extendedHours?: boolean; // Support for pre/post market trading
     timestamp: string;
     reduceOnly?: boolean;
+    profit?: number; // Calculated profit for closed orders (sell price - buy price) * amount - fees
 }
 
 export type SignalSource = 'tradingview' | 'manual' | 'MACD' | 'RSI' | 'Stochastic';
@@ -101,7 +111,6 @@ export interface PerformanceSnapshot {
     timestamp: string;
     totalEquity: number;
     unrealizedPnL: number;
-    realizedPnL: number;
     dailyPnL: number;
     drawdown: number;
 }

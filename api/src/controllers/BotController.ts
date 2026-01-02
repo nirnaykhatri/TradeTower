@@ -47,29 +47,40 @@ const IndicatorConditionSchema = z.object({
     return true;
 }, { message: "Invalid configuration for the selected indicator" });
 
-const BaseConfig = z.object({
-    stopLoss: z.number().min(0).max(100).optional(),
-    stopLossEnabled: z.boolean().default(false),
-    takeProfit: z.number().min(0).max(1000).optional(),
-    takeProfitEnabled: z.boolean().default(false),
-    startConditions: z.array(IndicatorConditionSchema).optional(),
-});
-
-const GridConfigSchema = BaseConfig.extend({
+/**
+ * ========================================
+ * 1. GRID BOT SCHEMA
+ * ========================================
+ * Spot trading: Places buy/sell orders at predefined intervals within a price range
+ */
+const GridConfigSchema = z.object({
     lowPrice: z.number().positive(),
     highPrice: z.number().positive(),
     highPriceTrailing: z.boolean().default(false),
     gridStep: z.number().min(0.1).max(100),
     gridLevels: z.number().int().min(5).max(100),
     orderSizeCurrency: z.enum(['BASE', 'QUOTE']),
+    investment: z.number().positive(),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
     trailingUp: z.boolean().default(true),
     pumpProtection: z.boolean().default(true),
     trailingDown: z.boolean().default(false),
+    stopLoss: z.number().min(0).max(100).optional(),
+    stopLossEnabled: z.boolean().default(false),
+    takeProfit: z.number().min(0).max(1000).optional(),
+    takeProfitEnabled: z.boolean().default(false),
 }).refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" });
 
-const DCAConfigSchema = BaseConfig.extend({
+/**
+ * ========================================
+ * 2. DCA BOT SCHEMA
+ * ========================================
+ * Spot trading: Dollar Cost Averaging with safety orders
+ */
+const DCAConfigSchema = z.object({
     strategy: z.enum(['LONG', 'SHORT']),
     investment: z.number().positive(),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
     baseOrderAmount: z.number().positive(),
     baseOrderCondition: z.enum(['IMMEDIATELY', 'PRICE_CHANGE', 'MANUAL']),
     baseOrderType: z.enum(['LIMIT', 'MARKET']),
@@ -80,9 +91,19 @@ const DCAConfigSchema = BaseConfig.extend({
     activeOrdersLimitEnabled: z.boolean().default(false),
     amountMultiplier: z.number().min(1).max(2).default(1),
     stepMultiplier: z.number().min(1).max(2).default(1),
+    takeProfitPercent: z.number().min(0.1).max(1000).optional(),
+    stopLossPercent: z.number().min(0).max(100).optional(),
 });
 
-const BTDConfigBaseSchema = BaseConfig.extend({
+/**
+ * ========================================
+ * 3. BTD BOT SCHEMA
+ * ========================================
+ * Spot trading: Buy The Dip - asymmetric grid approach
+ */
+const BTDConfigSchema = z.object({
+    investment: z.number().positive(),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
     lowPrice: z.number().positive(),
     lowPriceTrailing: z.boolean().default(true),
     highPrice: z.number().positive(),
@@ -92,17 +113,71 @@ const BTDConfigBaseSchema = BaseConfig.extend({
     levelsUp: z.number().int().min(1),
     levelsDistribution: z.number().min(0).max(100),
     trailing: z.boolean().default(true),
-});
-
-const BTDConfigSchema = BTDConfigBaseSchema.refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" });
-
-const ComboConfigSchema = BTDConfigBaseSchema.extend({
-    positionSizeLimit: z.number().positive().optional(),
-    reuseCompletedOrders: z.boolean().default(true),
-    dynamicRebalancing: z.boolean().default(false),
+    stopLoss: z.number().min(0).max(100).optional(),
+    stopLossEnabled: z.boolean().default(false),
+    takeProfit: z.number().min(0).max(1000).optional(),
+    takeProfitEnabled: z.boolean().default(false),
 }).refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" });
 
+/**
+ * ========================================
+ * 4. COMBO BOT SCHEMA
+ * ========================================
+ * Futures trading: DCA entry + Grid exit with leverage and trailing stop loss
+ */
+const ComboConfigSchema = z.object({
+    // Futures-specific (required)
+    strategy: z.enum(['LONG', 'SHORT']),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
+    initialMargin: z.number().positive(),
+    leverage: z.number().min(1).max(125),
+    marginType: z.enum(['CROSS', 'ISOLATED']),
+    
+    // Price range
+    lowPrice: z.number().positive(),
+    highPrice: z.number().positive(),
+    
+    // DCA Entry Phase
+    baseOrderAmount: z.number().positive(),
+    baseOrderCondition: z.enum(['IMMEDIATELY', 'PRICE_CHANGE', 'MANUAL']).optional(),
+    baseOrderType: z.enum(['LIMIT', 'MARKET']).optional(),
+    averagingOrdersAmount: z.number().positive(),
+    averagingOrdersQuantity: z.number().int().min(0).max(50),
+    averagingOrdersStep: z.number().min(0.1).max(50),
+    
+    // Grid Exit Phase
+    gridStep: z.number().min(0.1).max(100),
+    gridLevels: z.number().int().min(5).max(100),
+    
+    // Orders management
+    activeOrdersLimit: z.number().int().min(1).max(100).optional(),
+    activeOrdersLimitEnabled: z.boolean().default(false),
+    
+    // Take Profit (flexible: % or price)
+    takeProfitType: z.enum(['PERCENT', 'PRICE']).optional(),
+    takeProfitPercent: z.number().min(0.1).max(1000).optional(),
+    takeProfitPrice: z.number().positive().optional(),
+    
+    // Stop Loss (flexible: % or price, trailing by default)
+    stopLossType: z.enum(['PERCENT', 'PRICE']).optional(),
+    stopLossPercent: z.number().min(0).max(100).optional(),
+    stopLossPrice: z.number().positive().optional(),
+    trailingStopLoss: z.boolean().default(true),
+    trailingStopPercent: z.number().min(0.1).max(50).optional(),
+    
+    // Risk management
+    liquidationBuffer: z.number().min(5).max(50).optional(),
+}).refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" });
+
+/**
+ * ========================================
+ * 5. LOOP BOT SCHEMA
+ * ========================================
+ * Spot trading: Continuous loop between buy and sell in a price range
+ */
 const LoopConfigSchema = z.object({
+    investment: z.number().positive(),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
     lowPrice: z.number().positive(),
     highPrice: z.number().positive(),
     orderDistance: z.number().min(0.1).max(50),
@@ -111,37 +186,58 @@ const LoopConfigSchema = z.object({
     takeProfitEnabled: z.boolean().default(false),
 }).refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" });
 
-const DCAFuturesConfigSchema = DCAConfigSchema.extend({
-    exchange: z.string(), // Must be futures exchange
+/**
+ * ========================================
+ * 6. DCA FUTURES BOT SCHEMA
+ * ========================================
+ * Futures trading: DCA strategy with leverage support
+ */
+const DCAFuturesConfigSchema = z.object({
+    strategy: z.enum(['LONG', 'SHORT']),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
     initialMargin: z.number().positive(),
     leverage: z.number().min(1).max(125),
     marginType: z.enum(['CROSS', 'ISOLATED']),
+    baseOrderAmount: z.number().positive(),
+    averagingOrdersAmount: z.number().positive(),
+    averagingOrdersQuantity: z.number().int().min(0).max(50),
+    averagingOrdersStep: z.number().min(0.1).max(50),
+    takeProfitPercent: z.number().min(0.1).max(1000).optional(),
+    stopLossPercent: z.number().min(0).max(100).optional(),
     liquidationBuffer: z.number().min(5).max(50).optional(),
 });
 
-// 7. Futures Grid
-const FuturesGridConfigSchema = BaseConfig.extend({
+/**
+ * ========================================
+ * 7. FUTURES GRID BOT SCHEMA
+ * ========================================
+ * Futures trading: Grid trading with leverage (Long/Short/Neutral)
+ */
+const FuturesGridConfigSchema = z.object({
+    strategyType: z.enum(['LONG', 'SHORT', 'NEUTRAL']),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
+    marginType: z.enum(['ISOLATED', 'CROSS']),
+    leverage: z.number().min(1).max(100),
+    investment: z.number().positive(),
     lowPrice: z.number().positive(),
     highPrice: z.number().positive(),
-    highPriceTrailing: z.boolean().default(false),
-    gridStep: z.number().min(0.1).max(100),
-    gridLevels: z.number().int().min(5).max(100),
-    orderSizeCurrency: z.enum(['BASE', 'QUOTE']),
-    trailingUp: z.boolean().default(true),
-    pumpProtection: z.boolean().default(true),
-    trailingDown: z.boolean().default(false),
-    strategyType: z.enum(['LONG', 'SHORT', 'NEUTRAL']),
-    marginType: z.enum(['CROSS', 'ISOLATED']),
-    leverage: z.number().min(1).max(100),
     gridQuantity: z.number().int().min(2).max(200),
     gridMode: z.enum(['ARITHMETIC', 'GEOMETRIC']),
     triggerPrice: z.number().positive().optional(),
+    stopLoss: z.number().optional(),
+    takeProfit: z.number().optional(),
     closePositionOnStop: z.boolean().default(true),
 }).refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" });
 
-// 8. TWAP
+/**
+ * ========================================
+ * 8. TWAP BOT SCHEMA
+ * ========================================
+ * Spot/Futures trading: Time-weighted average price execution
+ */
 const TWAPConfigSchema = z.object({
     direction: z.enum(['BUY', 'SELL']),
+    feeBuffer: z.number().min(0).max(0.01).default(0.001),
     totalAmount: z.number().positive(),
     duration: z.number().int().min(5).max(1440),
     frequency: z.number().int().min(5).max(60),
@@ -328,15 +424,21 @@ export class BotController {
 
     /**
      * Toggle bot status (start/stop)
+     * Supports optional closure strategy when stopping bot
      */
     public async toggleBot(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
             const userId = req.user.userId;
             const { id } = req.params;
-            const { action } = req.body;
+            const { action, closureStrategy } = req.body;
 
             if (!['start', 'stop'].includes(action)) {
                 throw new AppError(400, 'Invalid action. Use "start" or "stop".');
+            }
+
+            // Validate closure strategy if provided
+            if (closureStrategy && !['CLOSE_POSITIONS', 'CANCEL_ORDERS', 'LIQUIDATE'].includes(closureStrategy)) {
+                throw new AppError(400, 'Invalid closureStrategy. Use "CLOSE_POSITIONS", "CANCEL_ORDERS", or "LIQUIDATE".');
             }
 
             const bot = await botRepository.getById(id, userId);
@@ -353,20 +455,32 @@ export class BotController {
             const updatedBot: BotInstance = {
                 ...bot,
                 status: newStatus,
+                closureStrategy: action === 'stop' ? closureStrategy : undefined,
                 updatedAt: new Date().toISOString()
             };
 
             // 1. Persist State
             const savedBot = await botRepository.upsert(updatedBot);
 
-            // 2. Sync with Engine (P0/High)
+            // 2. Execute closure strategy if stopping (optional)
+            if (action === 'stop' && closureStrategy) {
+                try {
+                    await botEngineService.executeBotClosure(savedBot, closureStrategy);
+                    logger.info(`Bot ${id} closure strategy '${closureStrategy}' executed for user ${userId}`);
+                } catch (closureError) {
+                    logger.error(`Closure strategy execution failed for bot ${id}: ${closureError}`);
+                    // Don't throw - bot is already stopped, closure is best-effort
+                }
+            }
+
+            // 3. Sync with Engine (P0/High)
             await botEngineService.syncBotState(savedBot, action);
 
             logger.info(`Bot ${id} status changed to ${newStatus} by user ${userId}`);
 
             res.status(200).json({
                 status: 'success',
-                message: `Bot ${action === 'start' ? 'started' : 'stopped'} successfully`,
+                message: `Bot ${action === 'start' ? 'started' : 'stopped'} successfully${closureStrategy ? ` with ${closureStrategy} closure` : ''}`,
                 data: { bot: savedBot }
             });
         } catch (error) {

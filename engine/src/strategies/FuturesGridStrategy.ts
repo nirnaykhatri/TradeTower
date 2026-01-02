@@ -117,6 +117,9 @@ export class FuturesGridStrategy extends BaseStrategy<FuturesGridConfig> {
      */
     private async placeGridOrder(side: 'buy' | 'sell', price: number, amount: number): Promise<void> {
         if (this.isPaused) return;
+        const adjustedPrice = side === 'buy'
+            ? price * (1 - this.feeBuffer)
+            : price * (1 + this.feeBuffer);
         try {
             const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
@@ -124,7 +127,7 @@ export class FuturesGridStrategy extends BaseStrategy<FuturesGridConfig> {
                 pair: this.bot.pair,
                 side,
                 type: 'limit',
-                price,
+                price: adjustedPrice,
                 amount
             });
             this.activeOrders.set(order.id, order);
@@ -162,8 +165,20 @@ export class FuturesGridStrategy extends BaseStrategy<FuturesGridConfig> {
             }
         }
 
-        if (this.config.takeProfit && price >= this.config.takeProfit) await this.stop('MARKET_SELL');
-        if (this.config.stopLoss && price <= this.config.stopLoss) await this.stop('MARKET_SELL');
+        const isShort = this.config.strategyType === 'SHORT';
+        if (this.config.takeProfit) {
+            const tpHit = isShort
+                ? price <= this.config.takeProfit * (1 - this.feeBuffer)
+                : price >= this.config.takeProfit * (1 + this.feeBuffer);
+            if (tpHit) await this.stop('MARKET_SELL');
+        }
+
+        if (this.config.stopLoss) {
+            const slHit = isShort
+                ? price >= this.config.stopLoss * (1 + this.feeBuffer)
+                : price <= this.config.stopLoss * (1 - this.feeBuffer);
+            if (slHit) await this.stop('MARKET_SELL');
+        }
     }
 
     /**

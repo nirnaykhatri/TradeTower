@@ -96,7 +96,7 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
     private async placeSell(buyOrder: TradeOrder): Promise<void> {
         if (this.isPaused) return;
         const tpMultiplier = 1 + (this.config.takeProfit || 1) / 100;
-        const sellPrice = buyOrder.price * tpMultiplier;
+        const sellPrice = buyOrder.price * tpMultiplier * (1 + this.feeBuffer * 2);
 
         try {
             const order = await this.executeOrderWithRetry({
@@ -163,7 +163,7 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
 
         if (order.side === 'sell' && profit > 0) {
             this.bot.performance.botProfit += profit;
-            this.bot.performance.realizedPnL += profit;
+            order.profit = profit;
         }
 
         // Count trades

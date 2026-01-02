@@ -57,6 +57,7 @@ export abstract class BaseStrategy<T = any> implements IBotStrategy {
     protected lastPrice: number = 0;
     protected isPaused: boolean = false;
     protected avgCostBasis: number = 0;
+    protected feeBuffer: number = 0; // percentage as decimal (e.g., 0.001 = 0.1%)
 
     constructor(
         protected bot: BotInstance,
@@ -66,6 +67,20 @@ export abstract class BaseStrategy<T = any> implements IBotStrategy {
         if (!this.bot.performance) {
             this.bot.performance = this.getDefaultPerformance();
         }
+
+        // Normalize fee buffer (allow zero; clamp to 1%)
+        const rawFeeBuffer = (config as any)?.feeBuffer;
+        this.feeBuffer = this.normalizeFeeBuffer(rawFeeBuffer, 0);
+    }
+
+    /**
+     * Normalize fee buffer input, allowing undefined/zero and clamping to a sane upper bound.
+     */
+    protected normalizeFeeBuffer(value: number | undefined, fallback: number): number {
+        const candidate = Number.isFinite(value as number) ? (value as number) : fallback;
+        if (candidate < 0) return 0;
+        // Allow up to 1% to avoid over-buffering
+        return Math.min(candidate, 0.01);
     }
 
     /**
@@ -76,8 +91,8 @@ export abstract class BaseStrategy<T = any> implements IBotStrategy {
             totalPnL: 0,
             totalPnLPercent: 0,
             botProfit: 0,
-            realizedPnL: 0,
             unrealizedPnL: 0,
+            baseQuoteRatio: 0,
             annualizedReturn: 0,
             drawdown: 0,
             totalTrades: 0,
@@ -287,6 +302,11 @@ export abstract class BaseStrategy<T = any> implements IBotStrategy {
         performance.totalPnLPercent =
             (performance.totalPnL / (performance.initialInvestment || 1)) * 100;
 
+        // Base/quote allocation ratio by value
+        const baseValue = currentPrice * performance.baseBalance;
+        const totalValue = baseValue + performance.quoteBalance;
+        performance.baseQuoteRatio = totalValue > 0 ? baseValue / totalValue : 0;
+
         // Calculate annualized return
         performance.annualizedReturn = this.calculateAnnualizedReturn();
 
@@ -295,6 +315,16 @@ export abstract class BaseStrategy<T = any> implements IBotStrategy {
         const highWaterMark = performance.initialInvestment * (1 + Math.max(0, performance.totalPnLPercent / 100));
         const currentDrawdown = ((highWaterMark - currentValue) / highWaterMark) * 100;
         performance.drawdown = Math.max(performance.drawdown, currentDrawdown);
+
+        // Trading duration
+        if (!performance.tradingStartTime) {
+            performance.tradingStartTime = new Date().toISOString();
+        }
+        const start = new Date(performance.tradingStartTime).getTime();
+        const now = Date.now();
+        const diffHours = (now - start) / (1000 * 60 * 60);
+        performance.tradingDurationHours = diffHours;
+        performance.tradingDurationDays = diffHours / 24;
     }
 
     abstract onPriceUpdate(price: number): Promise<void>;
