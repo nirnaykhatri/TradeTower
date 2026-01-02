@@ -15,6 +15,7 @@
     "@azure/cosmos": "^4.9.0",
     "@azure/functions": "^4.0.0",
     "@azure/identity": "^4.13.0",
+    "@azure/service-bus": "^7.9.0",
     "@trading-tower/shared": "^1.0.0",
     "zod": "^4.3.4"
   },

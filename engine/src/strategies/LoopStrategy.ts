@@ -188,7 +188,9 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
                     const tradeRevenue = order.amount * order.price;
                     const tradeCost = order.amount * originalBuyPrice;
                     const tradeProfit = tradeRevenue - tradeCost;
-                    newAmount = (tradeCost + tradeProfit) / originalBuyPrice;
+                    const reinvestPercent = this.config.reinvestProfitPercent ?? 100;
+                    const reinvestProfit = tradeProfit * (reinvestPercent / 100);
+                    newAmount = (tradeCost + reinvestProfit) / originalBuyPrice;
                 }
 
                 await this.placeBuy(originalBuyPrice, newAmount);

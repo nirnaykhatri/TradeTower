@@ -131,3 +131,9 @@ import { createOrderRepository } from './db/OrderRepository';
 // Create default repository instances with the default database service
 export const botRepository = createBotRepository(dbService);
 export const orderRepository = createOrderRepository(dbService);
+
+export * from './services/SignalCache';
+export * from './services/ProfitCalculator';
+export * from './services/DependencyInjection';
+export * from './services/ConfigValidator';
+export * from './services/OrderPlacementService';

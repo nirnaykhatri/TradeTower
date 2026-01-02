@@ -42,10 +42,11 @@ export interface DCAConfig {
     investment: number;
     feeBuffer?: number; // 0-1% recommended; protects edge fills
     baseOrderAmount: number;
-    baseOrderCondition: 'IMMEDIATELY' | 'PRICE_CHANGE' | 'MANUAL' | 'INDICATOR';
+    baseOrderCondition: 'IMMEDIATELY' | 'INDICATOR' | 'TRADINGVIEW';
     baseOrderType: 'LIMIT' | 'MARKET';
     triggerPrice?: number;
     entryIndicator?: IndicatorCondition;
+    entryIndicators?: IndicatorCondition[];
     averagingOrdersAmount: number;
     averagingOrdersQuantity: number;
     averagingOrdersStep: number;
@@ -60,11 +61,13 @@ export interface DCAConfig {
     stopLossPercent?: number;
     placeSafetyOrdersAtStart?: boolean;
     reinvestProfit?: boolean;
+    reinvestProfitPercent?: number; // 0-100: % of profit to reinvest into next cycle
     cooldownSeconds?: number;
     trailingSL?: boolean;
     trailingSLStep?: number;
     maxPrice?: number;
     minPrice?: number;
+    reserveFundsEnabled?: boolean; // When maxPrice is set, automatically reserve funds via limit order
     targetTotalProfit?: number;
     allowedTotalLoss?: number;
     pumpProtection?: boolean;
@@ -126,6 +129,7 @@ export interface LoopConfig {
     orderCount: number;
     takeProfit?: number;
     reinvestProfit?: boolean;
+    reinvestProfitPercent?: number; // 0-100: % of profit to reinvest
     takeProfitEnabled?: boolean;
 }
 
@@ -136,8 +140,9 @@ export interface DCAFuturesConfig {
     leverage: number; // For futures
     marginType: 'CROSS' | 'ISOLATED'; // For futures
     baseOrderAmount: number;
-    baseOrderCondition?: 'IMMEDIATELY' | 'PRICE_CHANGE' | 'MANUAL';
+    baseOrderCondition?: 'IMMEDIATELY' | 'INDICATOR' | 'TRADINGVIEW';
     baseOrderType?: 'LIMIT' | 'MARKET';
+    entryIndicators?: IndicatorCondition[];
     averagingOrdersAmount: number;
     averagingOrdersQuantity: number;
     averagingOrdersStep: number;

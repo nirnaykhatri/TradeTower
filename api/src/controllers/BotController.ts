@@ -82,8 +82,9 @@ const DCAConfigSchema = z.object({
     investment: z.number().positive(),
     feeBuffer: z.number().min(0).max(0.01).default(0.001),
     baseOrderAmount: z.number().positive(),
-    baseOrderCondition: z.enum(['IMMEDIATELY', 'PRICE_CHANGE', 'MANUAL']),
+    baseOrderCondition: z.enum(['IMMEDIATELY', 'INDICATOR', 'TRADINGVIEW']).default('IMMEDIATELY'),
     baseOrderType: z.enum(['LIMIT', 'MARKET']),
+    entryIndicators: z.array(IndicatorConditionSchema).optional(),
     averagingOrdersAmount: z.number().positive(),
     averagingOrdersQuantity: z.number().int().min(0).max(100),
     averagingOrdersStep: z.number().min(0.1).max(50),
@@ -93,6 +94,29 @@ const DCAConfigSchema = z.object({
     stepMultiplier: z.number().min(1).max(2).default(1),
     takeProfitPercent: z.number().min(0.1).max(1000).optional(),
     stopLossPercent: z.number().min(0).max(100).optional(),
+    maxPrice: z.number().positive().optional(),
+    minPrice: z.number().positive().optional(),
+    reserveFundsEnabled: z.boolean().default(false),
+    reinvestProfitPercent: z.number().min(0).max(100).optional(),
+}).refine(data => {
+    // If indicators are required (INDICATOR or TRADINGVIEW condition), validate presence
+    if ((data.baseOrderCondition === 'INDICATOR' || data.baseOrderCondition === 'TRADINGVIEW') && 
+        (!data.entryIndicators || data.entryIndicators.length === 0)) {
+        return false;
+    }
+    return true;
+}, {
+    message: "entryIndicators are required when baseOrderCondition is 'INDICATOR' or 'TRADINGVIEW'",
+    path: ['entryIndicators']
+}).refine(data => {
+    // If reserveFundsEnabled, maxPrice must be provided
+    if (data.reserveFundsEnabled && !data.maxPrice) {
+        return false;
+    }
+    return true;
+}, {
+    message: "maxPrice is required when reserveFundsEnabled is true",
+    path: ['maxPrice']
 });
 
 /**
@@ -139,8 +163,9 @@ const ComboConfigSchema = z.object({
     
     // DCA Entry Phase
     baseOrderAmount: z.number().positive(),
-    baseOrderCondition: z.enum(['IMMEDIATELY', 'PRICE_CHANGE', 'MANUAL']).optional(),
+    baseOrderCondition: z.enum(['IMMEDIATELY', 'INDICATOR', 'TRADINGVIEW']).default('IMMEDIATELY'),
     baseOrderType: z.enum(['LIMIT', 'MARKET']).optional(),
+    entryIndicators: z.array(IndicatorConditionSchema).optional(),
     averagingOrdersAmount: z.number().positive(),
     averagingOrdersQuantity: z.number().int().min(0).max(50),
     averagingOrdersStep: z.number().min(0.1).max(50),
@@ -167,7 +192,17 @@ const ComboConfigSchema = z.object({
     
     // Risk management
     liquidationBuffer: z.number().min(5).max(50).optional(),
-}).refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" });
+}).refine(data => data.highPrice > data.lowPrice, { message: "highPrice must be > lowPrice" }).refine(data => {
+    // If base order requires indicators, validate presence
+    if ((data.baseOrderCondition === 'INDICATOR' || data.baseOrderCondition === 'TRADINGVIEW') && 
+        (!data.entryIndicators || data.entryIndicators.length === 0)) {
+        return false;
+    }
+    return true;
+}, {
+    message: "entryIndicators are required when baseOrderCondition is 'INDICATOR' or 'TRADINGVIEW'",
+    path: ['entryIndicators']
+});
 
 /**
  * ========================================

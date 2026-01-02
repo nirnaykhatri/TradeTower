@@ -14,6 +14,7 @@ import {
     validateRequired
 } from '@trading-tower/shared';
 import { IExchangeConnector } from '@trading-tower/connectors';
+import { ServiceBusSignalMessage } from '../services/ServiceBusSignalListener';
 
 export type ExitMode = 'CANCEL_ALL' | 'MARKET_SELL' | 'KEEP_ORDERS';
 
@@ -26,6 +27,8 @@ export interface IBaseBotStrategy {
     stop(exitMode?: ExitMode): Promise<void>;
     onPriceUpdate(price: number): Promise<void>;
     onOrderFilled(order: TradeOrder): Promise<void>;
+    onCandleClose?(candle: any): Promise<void>;  // Optional: candle-close event (for indicator evaluation)
+    onSignal?(message: ServiceBusSignalMessage): Promise<void>;  // Optional: Service Bus signal handler
 }
 
 /**

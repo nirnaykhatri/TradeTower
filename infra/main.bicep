@@ -18,6 +18,7 @@ var shortAppName = take(sanitizedAppName, 10) // Shorten for length-constrained 
 var names = {
   cosmos: 'cosmos-${sanitizedAppName}-${environment}-${uniqueSuffix}'
   webpubsub: 'wps-${sanitizedAppName}-${environment}-${uniqueSuffix}'
+  servicebus: 'sb-${sanitizedAppName}-${environment}-${uniqueSuffix}'
   containerAppEnv: 'cae-${sanitizedAppName}-${environment}-${uniqueSuffix}'
   // KV limit is 24 chars: kv-{10chars}-{4chars}-{6chars} = 24
   keyvault: 'kv-${shortAppName}-${environment}-${take(uniqueSuffix, 6)}'
@@ -48,9 +49,19 @@ module webpubsub 'modules/webpubsub.bicep' = {
   name: 'webpubsub-deploy'
   params: {
     serviceName: names.webpubsub
-    serviceName: names.webpubsub
     location: location
     sku: environment == 'prod' ? 'Standard_S1' : 'Free_F1'
+    tags: defaultTags
+  }
+}
+
+// 2.5. Service Bus (Event-Driven Entry Signals)
+module servicebus 'modules/servicebus.bicep' = {
+  name: 'servicebus-deploy'
+  params: {
+    namespaceName: names.servicebus
+    location: location
+    skuName: environment == 'prod' ? 'Standard' : 'Basic'
     tags: defaultTags
   }
 }
@@ -90,10 +101,9 @@ module containerApps 'modules/containerapp.bicep' = {
   params: {
     environmentName: names.containerAppEnv
     location: location
-    environmentName: names.containerAppEnv
-    location: location
     appConfigEndpoint: appconfig.outputs.endpoint
     keyVaultName: keyvault.outputs.name
+    serviceBusConnectionString: servicebus.outputs.subscriberConnectionString
     tags: defaultTags
   }
 }
@@ -104,9 +114,8 @@ module functions 'modules/functions.bicep' = {
   params: {
     appName: names.functionApp
     location: location
-    appName: names.functionApp
-    location: location
     cosmosAccountName: cosmos.outputs.accountName
+    serviceBusConnectionString: servicebus.outputs.publisherConnectionString
     tags: defaultTags
   }
 }
@@ -122,12 +131,14 @@ module roleAssignments 'modules/roles.bicep' = {
     appConfigName: names.appconfig // using variable directly as resource already exists in same deployment
     keyVaultName: keyvault.outputs.name
     webPubSubName: names.webpubsub
+    serviceBusNamespaceName: servicebus.outputs.namespaceName
   }
   dependsOn: [
     cosmos
     appconfig
     keyvault
     webpubsub
+    servicebus
     containerApps
     functions
   ]
@@ -135,3 +146,4 @@ module roleAssignments 'modules/roles.bicep' = {
 
 output cosmosEndpoint string = cosmos.outputs.endpoint
 output webPubSubHostName string = webpubsub.outputs.hostName
+output serviceBusNamespace string = servicebus.outputs.namespaceName

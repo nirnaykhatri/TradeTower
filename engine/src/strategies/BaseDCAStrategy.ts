@@ -1,5 +1,6 @@
 import { BaseStrategy, ExitMode } from './BaseStrategy';
-import { TradeOrder, indicatorService, botRepository, ValidationError, CriticalStrategyError } from '@trading-tower/shared';
+import { TradeOrder, indicatorService, botRepository, ValidationError, CriticalStrategyError, signalCache } from '@trading-tower/shared';
+import { ServiceBusSignalMessage } from '../services/ServiceBusSignalListener';
 import {
     MAX_FILL_HISTORY,
     PUMP_PROTECTION_THRESHOLD,
@@ -64,6 +65,18 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
     /** Recent fill timestamps for pump detection */
     private lastFills: number[] = [];
 
+    /** Timestamp of last insufficient funds pause (for retry logic) */
+    private insufficientFundsPauseTime: number = 0;
+
+    /** Retry interval for insufficient funds (ms) - approx 5 minutes as per Bitsgap spec */
+    private readonly INSUFFICIENT_FUNDS_RETRY_MS: number = 5 * 60 * 1000;
+
+    /** Reservation order IDs when max price + reserve funds enabled (to lock investment) */
+    private reservationOrderIds: Set<string> = new Set();
+
+    /** Whether reservation orders are currently active */
+    private reservationActive: boolean = false;
+
     /** Get DCA configuration from derived class */
     protected abstract get dcaConfig(): any;
 
@@ -82,6 +95,9 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
      * 
      * Checks global kill switches and places base order
      * or waits for entry condition.
+     * 
+     * If max price + reserve funds enabled: places reservation order far from market
+     * to lock investment while waiting for max price to be reached.
      */
     async start(): Promise<void> {
         await this.updateBotStatus('running');
@@ -92,10 +108,20 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         const condition = this.dcaConfig.baseOrderCondition || 'IMMEDIATELY';
 
         if (condition === 'IMMEDIATELY') {
-            await this.placeBaseOrder();
+            // Check if we need to reserve funds first
+            if (this.dcaConfig.maxPrice && this.dcaConfig.reserveFundsEnabled !== false) {
+                await this.placeReservationOrders();
+            } else {
+                await this.placeBaseOrder();
+            }
         } else {
             console.log(`[DCA] Waiting for entry condition: ${condition}`);
             this.isWaitingForEntry = true;
+            
+            // If max price + reserve funds: place reservation orders while waiting
+            if (this.dcaConfig.maxPrice && this.dcaConfig.reserveFundsEnabled !== false) {
+                await this.placeReservationOrders();
+            }
         }
     }
 
@@ -140,11 +166,17 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         const ticker = await this.exchange.getTicker(this.bot.pair);
         const price = ticker.lastPrice;
 
-        // Check price bounds
+        // Check price bounds - price must be at or below maxPrice to enter
         if (this.dcaConfig.maxPrice && price > this.dcaConfig.maxPrice) {
             this.isWaitingForEntry = true;
             return;
         }
+        
+        // If we reach maxPrice, cancel reservation orders
+        if (this.reservationActive && this.dcaConfig.maxPrice && price <= this.dcaConfig.maxPrice) {
+            await this.cancelReservationOrders();
+        }
+
         if (this.dcaConfig.minPrice && price < this.dcaConfig.minPrice) {
             this.isWaitingForEntry = true;
             return;
@@ -193,6 +225,82 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
     }
 
     /**
+     * Place reservation orders to lock investment funds
+     * 
+     * Per Bitsgap spec: When max price + reserve funds enabled,
+     * places limit order far from market to lock the full investment amount
+     * on the exchange while waiting for max price to be reached.
+     * 
+     * For LONG: Places buy limit far below current price
+     * For SHORT: Places sell limit far above current price
+     */
+    private async placeReservationOrders(): Promise<void> {
+        if (this.reservationActive || !this.dcaConfig.maxPrice) return;
+
+        const ticker = await this.exchange.getTicker(this.bot.pair);
+        const currentPrice = ticker.lastPrice;
+        
+        const side = this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
+        
+        // Calculate reservation price far from market (per Bitsgap: very far away)
+        // Use 50% deviation to ensure order never fills accidentally
+        const reservationPrice = side === 'buy'
+            ? currentPrice * 0.5
+            : currentPrice * 1.5;
+
+        const totalInvestment = this.dcaConfig.baseOrderAmount + this.dcaConfig.averagingOrdersAmount;
+
+        try {
+            console.log(`[DCA] Placing reservation order to lock ${totalInvestment} investment. Side: ${side}, Price: ${reservationPrice.toFixed(8)}`);
+            
+            const order = await this.executeOrderWithRetry({
+                userId: this.bot.userId,
+                botId: this.bot.id,
+                pair: this.bot.pair,
+                side,
+                type: 'limit',
+                price: reservationPrice,
+                amount: totalInvestment
+            });
+
+            this.reservationOrderIds.add(order.id);
+            this.reservationActive = true;
+            console.log(`[DCA] Reservation order placed: ${order.id}. Waiting for max price ${this.dcaConfig.maxPrice} to be reached.`);
+        } catch (error: any) {
+            console.warn(`[DCA] Failed to place reservation order:`, error?.message);
+            // If reservation fails due to insufficient funds, pause bot
+            if (error?.message?.includes('Insufficient funds') || error?.code === 'INSUFFICIENT_FUNDS') {
+                console.warn(`[DCA] Insufficient funds for reservation order. Pausing bot.`);
+                await this.pause();
+            }
+        }
+    }
+
+    /**
+     * Cancel reservation orders when max price is reached
+     * 
+     * Per Bitsgap spec: When price reaches max price, automatically cancel
+     * the reservation order(s) so actual DCA entry can begin.
+     */
+    private async cancelReservationOrders(): Promise<void> {
+        if (!this.reservationActive || this.reservationOrderIds.size === 0) return;
+
+        console.log(`[DCA] Max price reached. Canceling ${this.reservationOrderIds.size} reservation order(s).`);
+
+        for (const orderId of this.reservationOrderIds) {
+            try {
+                await this.cancelOrderWithRetry(orderId, this.bot.pair);
+            } catch (error: any) {
+                console.warn(`[DCA] Failed to cancel reservation order ${orderId}:`, error?.message);
+            }
+        }
+
+        this.reservationOrderIds.clear();
+        this.reservationActive = false;
+        console.log(`[DCA] Reservation orders canceled. Ready to place base order.`);
+    }
+
+    /**
      * Detect unusual fill velocity (pump protection)
      * 
      * Checks if too many orders filled in short time window,
@@ -238,6 +346,132 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         }
         this.activeOrders.clear();
         this.safetyOrderMap.clear();
+        
+        // Also cancel any active reservation orders
+        await this.cancelReservationOrders();
+    }
+
+    /**
+     * Handle candle close event
+     * 
+     * For INDICATOR condition: evaluate all entry indicators when candle closes
+     * For TRADINGVIEW condition: check if cached signal arrived
+     * 
+     * Called from exchange websocket when candle closes at specified timeframe.
+     * This is more efficient than checking on every price tick.
+     * 
+     * @param candle Candle data (only candle close event, not every tick)
+     */
+    async onCandleClose(candle: any): Promise<void> {
+        if (this.isPaused || !this.isWaitingForEntry) return;
+
+        const condition = this.dcaConfig.baseOrderCondition;
+
+        if (condition === 'INDICATOR') {
+            // Evaluate all entry indicators on candle close
+            const indicators = this.dcaConfig.entryIndicators?.length
+                ? this.dcaConfig.entryIndicators
+                : (this.dcaConfig.entryIndicator ? [this.dcaConfig.entryIndicator] : []);
+
+            if (indicators.length === 0) {
+                console.warn('[DCA] INDICATOR condition set but no indicators configured');
+                return;
+            }
+
+            try {
+                const allSignals = await Promise.all(
+                    indicators.map((i: any) => this.checkIndicatorCondition(i, true))
+                );
+
+                // Entry requires ALL indicators to converge (AND logic)
+                const shouldEnter = allSignals.every(Boolean);
+                if (shouldEnter) {
+                    console.log(`[DCA] All ${allSignals.length} entry indicators converged. Placing base order.`);
+                    await this.placeBaseOrder();
+                }
+            } catch (error) {
+                console.error('[DCA] Indicator evaluation failed on candle close:', error);
+            }
+        } else if (condition === 'TRADINGVIEW') {
+            // Check if TradingView signal was cached
+            const tvSignal = signalCache.getSignal(this.bot.id);
+            if (tvSignal) {
+                console.log(`[DCA] TradingView signal received (${tvSignal.type}). Placing base order.`);
+                await this.placeBaseOrder();
+                signalCache.clearSignal(this.bot.id);
+            }
+        }
+    }
+
+    /**
+     * Validate if signal source matches bot's baseOrderCondition
+     * 
+     * @param message Service Bus signal message
+     * @returns True if signal is valid for this bot's entry condition
+     */
+    private validateSignalForEntry(message: ServiceBusSignalMessage): boolean {
+        const condition = this.dcaConfig.baseOrderCondition;
+        
+        if (!condition || condition === 'IMMEDIATELY') {
+            console.warn(`[DCA] Bot ${this.bot.id} has ${condition} condition, ignoring signal`);
+            return false;
+        }
+
+        if (condition === 'INDICATOR' && message.source !== 'INDICATOR') {
+            console.warn(`[DCA] Bot ${this.bot.id} expects INDICATOR signal but received ${message.source}`);
+            return false;
+        }
+
+        if (condition === 'TRADINGVIEW' && message.source !== 'TRADINGVIEW') {
+            console.warn(`[DCA] Bot ${this.bot.id} expects TRADINGVIEW signal but received ${message.source}`);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Handle Service Bus signal (INDICATOR or TRADINGVIEW)
+     * 
+     * Called by BotManager when a signal arrives from Service Bus.
+     * Places base order if bot is waiting for entry and signal is valid.
+     * 
+     * @param message Service Bus signal message
+     */
+    async onSignal(message: ServiceBusSignalMessage): Promise<void> {
+        if (this.isPaused) {
+            console.debug(`[DCA] Bot ${this.bot.id} is paused, ignoring signal`);
+            return;
+        }
+
+        if (!this.isWaitingForEntry) {
+            console.debug(`[DCA] Bot ${this.bot.id} is not waiting for entry, ignoring signal`);
+            return;
+        }
+
+        if (!this.validateSignalForEntry(message)) {
+            return;
+        }
+
+        console.log(
+            `[DCA] Bot ${this.bot.id} received ${message.source} signal: ${message.signal} ` +
+            `for ${message.pair} at ${new Date(message.timestamp).toISOString()}`
+        );
+
+        try {
+            // Cancel any reservation orders before placing base order
+            if (this.reservationActive) {
+                await this.cancelReservationOrders();
+            }
+
+            // Place base order
+            await this.placeBaseOrder();
+            
+            console.log(`[DCA] Bot ${this.bot.id} successfully placed base order from ${message.source} signal`);
+        } catch (error) {
+            console.error(`[DCA] Bot ${this.bot.id} failed to process signal:`, error);
+            throw error;
+        }
     }
 
     /**
@@ -247,22 +481,39 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
      * - Entry condition satisfaction (if waiting)
      * - Take profit (with optional trailing)
      * - Stop loss (with optional trailing)
+     * - Automatic retry if paused due to insufficient funds
      * - Updates unrealized PnL and performance metrics
      * 
      * @param price Current market price
      */
     async onPriceUpdate(price: number): Promise<void> {
-        if (this.isPaused) return;
         this.lastPrice = price;
 
-        if (this.isWaitingForEntry) {
-            if (this.dcaConfig.baseOrderCondition === 'PRICE_CHANGE' && this.dcaConfig.triggerPrice) {
-                const diff = Math.abs(price - this.dcaConfig.triggerPrice) / this.dcaConfig.triggerPrice;
-                if (diff < 0.005) await this.placeBaseOrder();
-            } else if (this.dcaConfig.baseOrderCondition === 'INDICATOR' && this.dcaConfig.entryIndicator) {
-                const signal = await this.checkIndicatorCondition(this.dcaConfig.entryIndicator, true);
-                if (signal) await this.placeBaseOrder();
+        // Check if max price reached while reservation active
+        if (this.reservationActive && this.dcaConfig.maxPrice && price <= this.dcaConfig.maxPrice) {
+            console.log(`[DCA] Max price ${this.dcaConfig.maxPrice} reached (current: ${price}). Attempting to place base order.`);
+            await this.cancelReservationOrders();
+            await this.placeBaseOrder();
+            return;
+        }
+
+        // Auto-retry insufficient funds pause after ~5 minutes
+        if (this.isPaused && this.insufficientFundsPauseTime > 0) {
+            const elapsedMs = Date.now() - this.insufficientFundsPauseTime;
+            if (elapsedMs >= this.INSUFFICIENT_FUNDS_RETRY_MS) {
+                console.log('[DCA] Retry interval elapsed. Attempting to resume after insufficient funds pause.');
+                await this.resume();
+                this.insufficientFundsPauseTime = 0;
+                await this.syncSafetyOrders();
             }
+            return;
+        }
+
+        if (this.isPaused) return;
+
+        if (this.isWaitingForEntry) {
+            // Entry condition checks moved to onCandleClose() for efficiency
+            // Avoids expensive indicator evaluation on every price tick
             return;
         }
 
@@ -400,13 +651,21 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
     /**
      * Synchronize safety orders on the exchange
      * 
-     * Places safety orders up to activeOrdersLimit or max total count.
+     * Places safety orders up to activeOrdersLimit or all (if limit disabled).
+     * When limit is enabled, only funds for active orders are reserved.
+     * Inactive orders remain "on hold" until previous orders fill.
      * Respects step multiplier and amount multiplier for martingale/anti-martingale.
      */
     protected async syncSafetyOrders(): Promise<void> {
         if (this.isPaused) return;
         const maxTotalCount = this.dcaConfig.averagingOrdersQuantity;
-        const activeLimit = this.dcaConfig.activeOrdersLimitEnabled ? (this.dcaConfig.activeOrdersLimit || 1) : 1;
+        
+        // If activeOrdersLimit is disabled, place all safety orders
+        // If enabled, only place up to the limit
+        const activeLimit = this.dcaConfig.activeOrdersLimitEnabled 
+            ? (this.dcaConfig.activeOrdersLimit || maxTotalCount)
+            : maxTotalCount;
+        
         let currentOnBook = this.safetyOrderMap.size;
         while (currentOnBook < activeLimit && this.nextSafetyOrderToIndex < maxTotalCount) {
             await this.placeNextSafetyOrder(this.nextSafetyOrderToIndex);
@@ -459,9 +718,10 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         } catch (error: any) {
             console.error(`[DCA] SO ${index} failed:`, error);
             
-            // Handle insufficient funds by pausing bot
+            // Handle insufficient funds by pausing bot with retry mechanism
             if (error?.message?.includes('Insufficient funds') || error?.code === 'INSUFFICIENT_FUNDS') {
-                console.warn(`[DCA] Insufficient funds for Safety Order ${index}. Pausing bot.`);
+                console.warn(`[DCA] Insufficient funds for Safety Order ${index}. Pausing bot. Will retry in ~5 minutes.`);
+                this.insufficientFundsPauseTime = Date.now();
                 await this.pause();
             } else {
                 await this.handleStrategyError(error as Error, `placeNextSafetyOrder(${index})`);
@@ -509,14 +769,23 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             // Reinvest profit if enabled
             if (this.dcaConfig.reinvestProfit && tradePnL > 0) {
                 const oldInvestment = (this.config as any).investment;
-                const newInvestment = oldInvestment + tradePnL;
-                const scaleFactor = newInvestment / oldInvestment;
+                const reinvestPercent = this.dcaConfig.reinvestProfitPercent ?? 100;
+                const reinvestAmount = tradePnL * (reinvestPercent / 100);
+                const newInvestment = oldInvestment + reinvestAmount;
 
-                console.log(`[DCA] Reinvesting profit. Scaling investment from ${oldInvestment} to ${newInvestment} (Factor: ${scaleFactor.toFixed(4)})`);
+                // Distribute reinvested amount based on original base/safety order ratio
+                const baseOrderAmount = (this.config as any).baseOrderAmount;
+                const averagingOrdersAmount = (this.config as any).averagingOrdersAmount;
+                const totalAllocated = baseOrderAmount + averagingOrdersAmount;
+                
+                const baseOrderPercent = baseOrderAmount / totalAllocated;
+                const safetyOrderPercent = averagingOrdersAmount / totalAllocated;
+
+                console.log(`[DCA] Reinvesting ${reinvestAmount.toFixed(2)} (${reinvestPercent}% of ${tradePnL.toFixed(2)} profit). Distribution: ${(baseOrderPercent * 100).toFixed(1)}% to base, ${(safetyOrderPercent * 100).toFixed(1)}% to safety orders`);
 
                 (this.config as any).investment = newInvestment;
-                (this.config as any).baseOrderAmount *= scaleFactor;
-                (this.config as any).averagingOrdersAmount *= scaleFactor;
+                (this.config as any).baseOrderAmount += reinvestAmount * baseOrderPercent;
+                (this.config as any).averagingOrdersAmount += reinvestAmount * safetyOrderPercent;
 
                 this.bot.config = this.config;
 
@@ -595,5 +864,75 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         } catch (error) {
             await this.handleStrategyError(error as Error, 'onOrderFilled');
         }
+    }
+
+    /**
+     * Add funds to current DCA cycle
+     * 
+     * Per Bitsgap spec:
+     * - Current cycle: only unfilled/partially filled orders recalculated
+     * - Filled orders keep original volume
+     * - Distribution follows original allocation (e.g., 30% base / 70% safety)
+     * - SL recalculated as average price changes
+     * - On-hold orders recalculated if Active Order Limit enabled
+     * - Next cycle: base order uses added funds; then split per allocation
+     * 
+     * @param amount Amount to add to current cycle investment
+     */
+    async increaseInvestment(amount: number): Promise<void> {
+        console.log(`[DCA] Adding ${amount} to current cycle.`);
+        
+        if (amount <= 0) {
+            throw new Error('Additional investment must be positive');
+        }
+
+        // Calculate original allocation percentages
+        const baseOrderAmount = (this.config as any).baseOrderAmount;
+        const averagingOrdersAmount = (this.config as any).averagingOrdersAmount;
+        const totalAllocated = baseOrderAmount + averagingOrdersAmount;
+        
+        if (totalAllocated === 0) {
+            throw new Error('Cannot add funds: no allocation configured');
+        }
+
+        const baseOrderPercent = baseOrderAmount / totalAllocated;
+        const safetyOrderPercent = averagingOrdersAmount / totalAllocated;
+
+        // Distribute added amount according to original ratio
+        const baseIncrease = amount * baseOrderPercent;
+        const safetyIncrease = amount * safetyOrderPercent;
+
+        console.log(`[DCA] Distributing added funds: ${baseIncrease.toFixed(2)} to base (${(baseOrderPercent * 100).toFixed(1)}%), ${safetyIncrease.toFixed(2)} to safety (${(safetyOrderPercent * 100).toFixed(1)}%)`);
+
+        // Update config amounts
+        // Note: This affects future unfilled orders placed by syncSafetyOrders()
+        // Filled orders retain their original volume (handled by placeNextSafetyOrder multiplier logic)
+        (this.config as any).baseOrderAmount += baseIncrease;
+        (this.config as any).averagingOrdersAmount += safetyIncrease;
+        (this.config as any).investment += amount;
+
+        // Update quote balance immediately (funds added)
+        this.bot.performance.quoteBalance += amount;
+
+        // Recalculate SL if currently active, as average price will change
+        if (this.dcaConfig.stopLossPercent && this.avgEntryPrice > 0) {
+            const factor = this.dcaConfig.strategy === 'LONG' ? -1 : 1;
+            const newSLPrice = this.avgEntryPrice * (1 + (this.dcaConfig.stopLossPercent / 100) * factor);
+            console.log(`[DCA] Stop Loss recalculated: ${this.currentSLPrice.toFixed(8)} → ${newSLPrice.toFixed(8)}`);
+            this.currentSLPrice = newSLPrice;
+        }
+
+        // Persist configuration and performance changes
+        this.bot.config = this.config;
+        await botRepository.update(this.bot.id, this.bot.userId, {
+            config: this.config,
+            performance: this.bot.performance
+        });
+
+        // Sync orders: recalculate unfilled orders with new amounts
+        // If Active Order Limit enabled, on-hold orders are also recalculated
+        await this.syncSafetyOrders();
+        
+        console.log(`[DCA] Funds added: +${amount}. Investment: ${(this.config as any).investment}, Base: ${(this.config as any).baseOrderAmount}, Safety: ${(this.config as any).averagingOrdersAmount}`);
     }
 }

@@ -1,3 +1,6 @@
+
+// Export all constants from the new StrategyConstants module for backward compatibility
+export * from './StrategyConstants';
 /**
  * Strategy execution constants
  * Centralized constants to avoid magic numbers throughout the codebase
