@@ -642,35 +642,316 @@ Added Funds: 500 USDT
 ## 3. **BTD (Buy The Dip) Bot**
 
 ### Overview
-Combines Grid and DCA approaches. Buys during dips and sells at higher prices within a defined range.
+
+The Buy The Dip (BTD) Bot is a specialized grid-based strategy optimized for **base-currency accumulation during price declines**. Unlike traditional grid bots that buy and sell symmetrically, BTD uses an **asymmetric grid structure** with more buy orders below the current price and fewer sell orders above, allowing it to aggressively accumulate the base currency when prices fall while taking profits on rebounds.
+
+**Core Principle**: The bot starts with initial sell orders above the current price (base-funded), positions itself to capture market dips through strategic buy orders, and automatically sells bounces back to accumulate base currency while generating quote currency profits. The strategy thrives on volatility by repeatedly buying dips and selling rebounds within a defined price range.
+
+**Key Innovation**: 
+- **Asymmetric Grid**: Configurable levels above/below anchor price for optimal dip-catching
+- **Base-Currency Profit Tracking**: Accurate profit calculation in base currency (not quote), accounting for buy/sell pairs
+- **Intelligent Trailing Down**: Extends grid downward during price declines to catch deeper dips
+- **Flexible Grid Configuration**: Two intuitive modes - range-driven (low/high + step%) or count-driven (levelsDown/levelsUp + step%)
+
+**Ideal Use Cases**:
+- Accumulating base currency during downtrends and sideways markets
+- Leveraging strong dip-recovery patterns with repeated bounces
+- Lowering average acquisition cost through systematic buying at progressively lower prices
+- Markets with predictable support/resistance levels within a range
+- Long-term position building with automatic profit reinvestment
+
+### When to Use the BTD Bot
+
+Use the BTD Bot when:
+- You want to accumulate base currency while prices are declining
+- You expect price to range between defined support and resistance levels
+- You're comfortable with dip buying and want to automate the process
+- You prefer scalping small profits on dips and recoveries rather than large directional moves
+- You want transparent profit tracking in the base currency you're accumulating
+
+**Not Recommended For**:
+- Strong sustained uptrends (prefer Grid bot for continuous sell opportunities)
+- Downtrends below your stop loss (need protective stops to limit losses)
+- Low liquidity pairs (wide spreads reduce profit margins)
+- Pairs with high volatility outside your configured range
 
 ### Configuration Fields
 
-| Field | Type | Required | Description | Validation |
-|-------|------|----------|-------------|------------|
-| `exchange` | String | Yes | Selected exchange/broker | Must be connected |
-| `pair` | String | Yes | Trading pair | Valid pair on exchange |
-| `investment` | Decimal | Yes | Total investment (BTC or USDT) | > 0 |
-| `lowPrice` | Decimal | Yes | Lower price boundary | > 0, < highPrice |
-| `lowPriceTrailing` | Boolean | No | Enable trailing for low price | Default: true |
-| `highPrice` | Decimal | Yes | Upper price boundary | > lowPrice |
-| `gridStep` | Decimal | Yes | Step between levels (%) | 0.1-100 |
-| `gridLevels` | Integer | Yes | Total grid levels | 5-100 |
-| `levelsDown` | Integer | Yes | Levels below current price | 1-gridLevels |
-| `levelsUp` | Integer | Yes | Levels above current price | 1-gridLevels |
-| `levelsDistribution` | Integer | Yes | % of levels below price | 0-100 |
-| `trailing` | Boolean | No | Enable trailing | Default: true |
-| `stopLoss` | Decimal | No | Stop loss % | 0-100 |
-| `stopLossEnabled` | Boolean | No | Enable stop loss | Default: false |
-| `takeProfit` | Decimal | No | Take profit % | 0-1000 |
-| `takeProfitEnabled` | Boolean | No | Enable take profit | Default: false |
+| Field | Type | Required | Description | Validation | Notes |
+|-------|------|----------|-------------|------------|-------|
+| `exchange` | String | Yes | Selected exchange/broker | Must be connected | Spot trading only |
+| `pair` | String | Yes | Trading pair | Valid pair on exchange | e.g., BTC/USDT, ETH/USDC |
+| **GRID CONFIGURATION (Choose One Path)** |
+| `lowPrice` | Decimal | Path 1 | Lower price boundary | > 0, < highPrice | Range-driven: set range directly |
+| `highPrice` | Decimal | Path 1 | Upper price boundary | > lowPrice | Range-driven: set range directly |
+| `gridStep` | Decimal | Path 1 or 2 | Price gap between levels (%) | 0.1-100 | Distance between consecutive grid levels |
+| `levelsDown` | Integer | Path 2 | Buy order levels below anchor | 0-gridLevels | Count-driven: explicit down levels |
+| `levelsUp` | Integer | Path 2 | Sell order levels above anchor | 0-gridLevels | Count-driven: explicit up levels |
+| `levelsDistribution` | Integer | No | Fallback level distribution (%) | 0-100 | Used only if explicit levels not provided; default 50 |
+| **INVESTMENT & SIZING** |
+| `investment` | Decimal | Yes | Total base currency allocated | > 0 | Initial amount for grid positioning |
+| `gridLevels` | Integer | Yes | Total grid levels | 5-100 | Total orders (buy + sell) in the grid |
+| **TRAILING & RISK MANAGEMENT** |
+| `trailing` | Boolean | No | Enable trailing mechanism | Default: true | Auto-adjust grid when price exits range |
+| `stopLoss` | Decimal | No | Stop loss percentage | 0-100 | Loss threshold; closes all positions |
+| `stopLossEnabled` | Boolean | No | Activate stop loss | Default: false | Must enable to use stop loss |
+| `takeProfit` | Decimal | No | Take profit percentage | 0.1-1000 | Profit target; closes all positions |
+| `takeProfitEnabled` | Boolean | No | Activate take profit | Default: false | Must enable to use take profit |
 
-### Execution Logic
-1. Calculate asymmetric grid (more levels below current price for buying dips)
-2. Place buy orders at lower levels
-3. When dip is bought → place sell order at corresponding upper level
-4. Continuously adjust grid with trailing if enabled
-5. Monitor TP/SL conditions
+**Configuration Paths** (Mutually Exclusive):
+
+*Path 1: Range-Driven (Explicit Price Boundaries)*
+```
+User provides: lowPrice, highPrice, gridStep%, gridLevels
+System derives: Number and placement of levelsDown/levelsUp based on gridLevels
+Grid anchors to: Midpoint between low and high price
+Use when: You know exact price range and want grid distributed within it
+```
+
+*Path 2: Count-Driven (Explicit Levels)*
+```
+User provides: levelsDown, levelsUp, gridStep%, gridLevels
+System derives: lowPrice and highPrice based on anchor and level spacing
+Grid anchors to: Current market price
+Use when: You know exactly how many buy/sell orders you want on each side
+```
+
+**Configuration Validation** (Automatic Checks):
+- ✓ If levelsDown/levelsUp provided → gridStep% is required
+- ✓ If using range mode → lowPrice and highPrice are required
+- ✓ gridLevels must be ≥ 2 (minimum 1 buy + 1 sell)
+- ✓ Cannot have both levelsDown and levelsUp = 0
+
+### How It Works
+
+#### Initialization Phase
+1. **Grid Calculation**: Based on configuration path (range or count), derive all grid price levels
+   - Range mode: Evenly distribute gridLevels between lowPrice and highPrice
+   - Count mode: Space levels based on levelsDown/levelsUp and gridStep%
+2. **Anchor Point**: Identify the anchor price (midpoint in range mode, current price in count mode)
+3. **Level Distribution**: Position buy orders below anchor, sell orders above anchor
+4. **Investment Allocation**: Divide total investment equally across gridLevels for initial sizing
+
+#### Trading Phase
+
+**Base-Funded Start** (Unique to BTD):
+- Bot starts by placing initial **sell orders ABOVE current price** only
+- Does NOT immediately place buy orders
+- This allows the bot to accumulate sell orders (profit orders) at higher price levels
+- Creates opportunity to fill these sells as price rebounds
+
+**When Buy Order Fills**:
+```typescript
+// Buy executed at lower level
+1. Remove buy order from active orders
+2. Place corresponding sell order at next higher grid level
+3. Store buy context (price, amount) for accurate profit tracking
+4. Update position metrics
+```
+
+**When Sell Order Fills**:
+```typescript
+// Sell executed at higher level
+1. Remove sell order from active orders
+2. Calculate profit in BASE currency using stored buy context:
+   - grossQuoteProfit = (sellPrice - buyPrice) × amount
+   - feeCost ≈ (sellPrice + buyPrice) × amount × feeRate
+   - netQuoteProfit = grossQuoteProfit - feeCost
+   - baseProfit = netQuoteProfit / sellPrice  ← Convert to base currency
+3. Update bot performance metrics with baseProfit
+4. Delete buy context from tracking map
+5. Place new buy order at next lower grid level
+```
+
+**Profit Calculation in Base Currency** (Advanced):
+The BTD bot uniquely tracks profit in base currency rather than quote. This is critical for bots accumulating the base asset:
+- Quote profit is converted back to base currency equivalent using the sell price
+- Formula: `baseProfit = netQuoteProfit / sellPrice`
+- Example: If profit is 100 USDT and sell price is 50,000, base profit = 0.002 BTC
+- This accurately reflects the additional base currency accumulated through trading
+
+#### Trailing Down Mechanism
+
+Activates when **price falls below the lowest grid level** + gridStep:
+
+```
+Current Grid: Buy orders at [48K, 49K, 50K], Sell orders at [51K, 52K]
+Price drops to 47K
+↓
+Trailing Down triggered:
+1. Cancel highest sell order (52K)
+2. Shift entire grid down by gridStepValueDown
+3. Place new sell order at new highest level (51K)
+4. New Grid: Buy orders at [47K, 48K, 49K], Sell orders at [50K, 51K]
+```
+
+**Benefits**:
+- Allows bot to "follow" price downward, catching increasingly deeper dips
+- Maintains constant grid level count by shifting rather than expanding
+- Preserves capital efficiency by reallocating from high levels to low levels
+- Automatic adaptation without manual intervention
+
+**Metadata Cleanup** (P0 Fix):
+- When cancelling orders during trailing, both activeOrders and orderMetadata Maps are cleaned
+- Prevents memory leaks in long-running bots
+- Ensures profit calculation remains accurate after trailing events
+
+#### Trailing Up Mechanism
+
+Activates when **price rises above the highest grid level** + gridStep:
+
+```
+Current Grid: Buy orders at [48K, 49K, 50K], Sell orders at [51K, 52K]
+Price rises to 53K
+↓
+Trailing Up triggered:
+1. Cancel lowest buy order (48K)
+2. Shift entire grid up by gridStepValueUp
+3. Push new sell order at highest level
+4. New Grid: Buy orders at [49K, 50K, 51K], Sell orders at [52K, 53K]
+```
+
+**Benefits**:
+- Follows uptrends to continue capturing rebounding profits
+- Helps exit accumulated positions gradually if price rallies
+- Reduces concentration of buy orders below price, improving capital efficiency
+
+#### Configuration Adjustment During Runtime
+
+**Adjustable** (No Restart Required):
+- ✓ Stop loss / Take profit thresholds
+- ✓ Trailing enable/disable
+- ✓ Risk management parameters
+
+**Not Adjustable** (Requires Restart):
+- ❌ Exchange or pair
+- ❌ Grid configuration (lowPrice, highPrice, gridStep, gridLevels)
+- ❌ Investment amount (use "Increase Investment" feature instead)
+
+### Bot Management Operations
+
+#### Adding Funds (Increase Investment)
+
+Enhance accumulation velocity without restarting:
+
+```
+Before: 10,000 USDT investment across 10 levels → 1,000 per level
+Add Funds: +5,000 USDT
+After: 15,000 USDT investment across 10 levels → 1,500 per level
+
+Effects:
+- All unfilled orders recalculated to larger sizes
+- Grid structure and levels remain unchanged
+- Statistics and performance preserved; only capacity increases
+```
+
+**Process**:
+1. Select running bot → [Bot Actions] → [Add Funds]
+2. Enter additional amount
+3. Confirm execution
+4. New orders placed at all levels with increased per-order amounts
+
+#### Stopping the Bot
+
+**Closure Strategies**:
+
+| Strategy | Execution | Position | Use Case |
+|----------|-----------|----------|----------|
+| `CLOSE_POSITIONS` | Market order to close all | Fully closed | Standard shutdown; locks current profit |
+| `CANCEL_ORDERS` | Cancel all pending | Position preserved | Stop trading only; manual position handling |
+| `LIQUIDATE` | Force close all + withdraw | Closed | Emergency stop; immediate exit required |
+| `NONE` (default) | No action | Preserved | Stop bot only; keep position open manually |
+
+### Risk Management & Considerations
+
+#### Market-Specific Risks
+
+**Price Spike Risk**:
+- Sudden price jump above high price level → sold out quickly, misses upside
+- Mitigation: Set highPrice appropriately; monitor market conditions
+
+**Flash Crash Risk**:
+- Quick price drop below low price → triggers multiple trailing downs, rapid capital deployment
+- Mitigation: Maintain reserve capital; use stop loss to limit downside
+
+**Sustained Downtrend Risk**:
+- Continuous price decline below stop loss threshold → entire position liquidated
+- Mitigation: Align stop loss with support level; choose range appropriately
+
+#### Mitigation Strategies
+
+1. **Stop Loss (SL)**: Closes all positions if loss exceeds threshold; limits downside exposure
+2. **Take Profit (TP)**: Locks gains at predefined profit target; guarantees exits
+3. **Price Range Selection**: Choose low/high based on technical support/resistance levels
+4. **Grid Step Sizing**: Wider steps in high volatility; tighter steps in sideways markets
+5. **Capital Reserve**: Keep funds available for margin requirements if pair demands it
+6. **Monitoring**: Regular review of bot performance and market conditions
+
+#### Best Practices
+
+- **Liquidity First**: Choose pairs with high volume and tight bid-ask spreads
+- **Range Validation**: Ensure low/high prices align with chart support/resistance
+- **Conservative Start**: Begin with smaller investments to validate strategy effectiveness
+- **Regular Reviews**: Monitor daily profit and adjust levels if market conditions shift
+- **Diversification**: Run multiple bots on different pairs to reduce concentration risk
+- **Documentation**: Track bot parameters and market conditions for future reference
+
+### Performance Monitoring
+
+#### Key Metrics
+
+| Metric | Definition | Unit | Interpretation |
+|--------|-----------|------|-----------------|
+| **Base Profit** | Total profit in base currency | Base asset | Net accumulation from trading |
+| **Quote Profit** | Total profit in quote currency | Quote asset | Cash gains from sales |
+| **Daily Average Profit** | Profit per day running | Base/Quote | Velocity of accumulation |
+| **Realized PnL** | Profit from closed trades | Base/Quote | Confirmed gains |
+| **Unrealized PnL** | Value of open positions | Base/Quote | Potential from current holdings |
+| **Win Rate** | % of profitable trades | % | Strategy effectiveness |
+| **Transaction Count** | Total filled orders | Count | Trading activity level |
+| **Trading Time** | Duration bot has run | Time | Cumulative operation period |
+| **Currency Allocation** | Base and quote holdings | Assets | Current position composition |
+
+#### Order History
+
+- **Completed Orders**: View all filled trades with execution price, amount, fees, and per-trade profit
+- **Open Orders**: Monitor active pending orders and their status
+- **Order Timeline**: Track chronological sequence of executions for analysis
+- **Profit per Trade**: Detailed breakdown enabling strategy refinement
+
+### Quick Setup Presets
+
+| Preset | Duration | Grid Step | Grid Levels | levelsDown | levelsUp | Best For |
+|--------|----------|-----------|-------------|-----------|----------|----------|
+| **Conservative** | 7+ days | 2-3% | 10-20 | 8-15 | 2-5 | Stable accumulation; dip-buying focus |
+| **Balanced** | 3-7 days | 1.0-1.5% | 15-25 | 10-15 | 5-10 | Mixed volatility; profit-taking |
+| **Aggressive** | 1-3 days | 0.5-0.8% | 25-40 | 15-30 | 10-15 | High volatility; rapid cycling |
+
+**Customization Tips**:
+- **More levelsDown**: Better for aggressive dip-buying; increases base accumulation
+- **More levelsUp**: Better for profit-taking; reduces base accumulation but locks gains
+- **Wider gridStep**: Fewer orders; larger individual trades; slower but steadier
+- **Narrower gridStep**: More orders; rapid cycling; higher transaction fees but finer control
+
+### Execution Logic Summary
+
+1. **Initialize**: Calculate asymmetric grid based on configuration path (range or count mode)
+2. **Start Trading**: Place initial sell orders above current price (base-funded model)
+3. **Monitor Price**: Track market price continuously
+4. **Handle Fills**: 
+   - Buy fill → place sell above → store buy context for profit tracking
+   - Sell fill → calculate base profit → place new buy below → clear buy context
+5. **Trailing Mechanism**: 
+   - If price falls below grid → trail down (shift and extend grid downward)
+   - If price rises above grid → trail up (shift grid upward)
+6. **Risk Management**: 
+   - Monitor stop loss and take profit conditions
+   - Close all positions if conditions triggered
+7. **Performance**: 
+   - Track total base profit, win rate, and daily accumulation metrics
+   - Display detailed order history and execution timeline
+
+---
 
 ---
 
