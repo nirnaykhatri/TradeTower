@@ -209,4 +209,23 @@ export class LoopStrategy extends BaseStrategy<LoopConfig> {
         if (!buyPrice) return 0;
         return (order.price - buyPrice) * order.amount;
     }
+
+    /**
+     * Handle order cancellation event from WebSocket
+     * Removes the cancelled order from activeOrders and orderMap tracking
+     * @param orderId The exchange order ID
+     * @param pair The trading pair
+     */
+    async onOrderCancelled(orderId: string, pair: string): Promise<void> {
+        const wasActive = this.activeOrders.delete(orderId);
+        const wasInOrderMap = this.orderMap.delete(orderId);
+        
+        if (wasActive || wasInOrderMap) {
+            console.log(
+                `[Bot ${this.bot.id}] Loop order ${orderId} cancelled and removed from tracking`
+            );
+        } else {
+            console.log(`[Bot ${this.bot.id}] Cancelled order ${orderId} not found in tracking maps`);
+        }
+    }
 }

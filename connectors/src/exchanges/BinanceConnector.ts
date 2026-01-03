@@ -1,7 +1,9 @@
-import { IExchangeConnector, ExchangeBalance, TickerData } from '../interfaces/IExchangeConnector';
+import { IExchangeConnector, ExchangeBalance, TickerData, WebSocketStatus } from '../interfaces/IExchangeConnector';
+import { IOrderFillListener } from '../interfaces/IOrderFillListener';
 import { TradeOrder, RateLimiter, ExchangeRateLimiters } from '@trading-tower/shared';
 import { AuthUtils } from '../utils/AuthUtils';
 import { ExchangeError } from '../interfaces/ExchangeError';
+import { BinanceWebSocketManager } from './BinanceWebSocketManager';
 import axios, { AxiosInstance, AxiosError } from 'axios';
 
 /**
@@ -12,11 +14,13 @@ import axios, { AxiosInstance, AxiosError } from 'axios';
  * - Signature-based authentication
  * - Comprehensive error handling
  * - Ticker, balance, order, and candle data retrieval
+ * - Real-time order fill notifications via WebSocket
  */
 export class BinanceConnector implements IExchangeConnector {
     public readonly name = 'Binance';
     private client: AxiosInstance;
     private rateLimiter: RateLimiter;
+    private wsManager: BinanceWebSocketManager | null = null;
 
     constructor(private apiKey: string, private apiSecret: string) {
         this.client = axios.create({
@@ -243,6 +247,74 @@ export class BinanceConnector implements IExchangeConnector {
             fee: 0,
             feeCurrency: 'USDT',
             timestamp: new Date(res.time).toISOString()
+        };
+    }
+
+    // ============ WebSocket Order Fill Subscriptions ============
+
+    /**
+     * Subscribe to receive order fill events via WebSocket User Data Stream
+     * 
+     * Establishes a WebSocket connection to Binance User Data Stream API
+     * and registers the listener for fill notifications on the specified pair.
+     * 
+     * @param pair Trading pair (e.g., "BTC/USDT")
+     * @param listener Listener to notify on fill events
+     * @throws If WebSocket connection cannot be established
+     */
+    async subscribeToOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        // Lazily initialize WebSocket manager on first subscription
+        if (!this.wsManager) {
+            this.wsManager = new BinanceWebSocketManager(this.apiKey, this.apiSecret);
+        }
+
+        await this.wsManager.subscribeToOrderFills(pair, listener);
+    }
+
+    /**
+     * Unsubscribe from receiving order fill events for a pair
+     * 
+     * @param pair Trading pair (e.g., "BTC/USDT")
+     * @param listener Listener to remove
+     */
+    async unsubscribeFromOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        if (!this.wsManager) return;
+
+        await this.wsManager.unsubscribeFromOrderFills(pair, listener);
+    }
+
+    /**
+     * Check if WebSocket connection is active and authenticated
+     * 
+     * @returns true if connected, false otherwise
+     */
+    isWebSocketConnected(): boolean {
+        if (!this.wsManager) return false;
+        return this.wsManager.isConnected();
+    }
+
+    /**
+     * Get detailed WebSocket connection status
+     * 
+     * @returns WebSocket status with connection details and metrics
+     */
+    getWebSocketStatus(): WebSocketStatus {
+        if (!this.wsManager) {
+            return {
+                isConnected: false,
+                exchange: this.name,
+                subscriptionCount: 0
+            };
+        }
+
+        const managerStatus = this.wsManager.getStatus();
+        return {
+            isConnected: managerStatus.isConnected,
+            exchange: this.name,
+            subscriptionCount: managerStatus.subscriptionCount,
+            lastEventTime: managerStatus.lastEventTime,
+            connectionUptime: managerStatus.connectionUptime,
+            reconnectionAttempts: managerStatus.reconnectAttempts
         };
     }
 }

@@ -13,7 +13,7 @@ import {
     validatePositiveNumber,
     validateRequired
 } from '@trading-tower/shared';
-import { IExchangeConnector } from '@trading-tower/connectors';
+import { IExchangeConnector, IOrderFillListener } from '@trading-tower/connectors';
 import { ServiceBusSignalMessage } from '../services/ServiceBusSignalListener';
 
 export type ExitMode = 'CANCEL_ALL' | 'MARKET_SELL' | 'KEEP_ORDERS';
@@ -48,15 +48,17 @@ export interface IConfigurableStrategy {
 
 /**
  * Full bot strategy interface combining all capabilities
+ * Extends IOrderFillListener for WebSocket order fill event handling
  */
-export interface IBotStrategy extends IBaseBotStrategy, IPausableStrategy, IConfigurableStrategy {}
+export interface IBotStrategy extends IBaseBotStrategy, IPausableStrategy, IConfigurableStrategy, IOrderFillListener {}
 
 /**
  * Abstract base class for all trading strategies
  * Provides common functionality: error handling, performance tracking, order management
+ * Implements IOrderFillListener for real-time WebSocket order fill events
  * @template T Strategy-specific configuration type
  */
-export abstract class BaseStrategy<T = any> implements IBotStrategy {
+export abstract class BaseStrategy<T = any> implements IBotStrategy, IOrderFillListener {
     protected lastPrice: number = 0;
     protected isPaused: boolean = false;
     protected avgCostBasis: number = 0;
@@ -332,6 +334,58 @@ export abstract class BaseStrategy<T = any> implements IBotStrategy {
 
     abstract onPriceUpdate(price: number): Promise<void>;
     abstract onOrderFilled(order: TradeOrder): Promise<void>;
+
+    /**
+     * Called when an order is partially filled via WebSocket.
+     * Default implementation delegates to onOrderFilled for simplicity.
+     * Override in subclasses if partial fills need special handling.
+     */
+    async onOrderPartiallyFilled(order: TradeOrder): Promise<void> {
+        console.log(
+            `[Bot ${this.bot.id}] Order ${order.id} partially filled: ` +
+            `${order.filledAmount}/${order.amount} @ ${order.price}`
+        );
+        // Most strategies can treat partial fills same as full fills
+        // Subclasses can override if they need different behavior
+        await this.onOrderFilled(order);
+    }
+
+    /**
+     * Called when an order is cancelled via WebSocket.
+     * Default implementation logs the cancellation.
+     * Override in subclasses if cancellation needs special handling (e.g., resubmit).
+     */
+    async onOrderCancelled(orderId: string, pair: string): Promise<void> {
+        console.log(`[Bot ${this.bot.id}] Order ${orderId} cancelled for ${pair}`);
+        // Subclasses should override to remove from active orders tracking
+    }
+
+    /**
+     * Called when WebSocket connection is established and authenticated.
+     * Override in subclasses if connection status needs special handling.
+     */
+    async onWebSocketConnected(exchange: string): Promise<void> {
+        console.log(`[Bot ${this.bot.id}] WebSocket connected to ${exchange}`);
+    }
+
+    /**
+     * Called when WebSocket connection is lost or closed.
+     * Override in subclasses if disconnection needs special handling (e.g., fallback to polling).
+     */
+    async onWebSocketDisconnected(exchange: string): Promise<void> {
+        console.warn(`[Bot ${this.bot.id}] WebSocket disconnected from ${exchange}`);
+    }
+
+    /**
+     * Called when an error occurs in the WebSocket connection.
+     * Override in subclasses if error recovery is needed.
+     */
+    async onWebSocketError(exchange: string, error: Error): Promise<void> {
+        console.error(
+            `[Bot ${this.bot.id}] WebSocket error from ${exchange}:`,
+            error.message
+        );
+    }
 
     /**
      * Record trade execution and update performance

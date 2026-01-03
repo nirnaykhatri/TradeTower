@@ -1,4 +1,5 @@
-import { IExchangeConnector, ExchangeBalance, TickerData } from '../interfaces/IExchangeConnector';
+import { IExchangeConnector, ExchangeBalance, TickerData, WebSocketStatus } from '../interfaces/IExchangeConnector';
+import { IOrderFillListener } from '../interfaces/IOrderFillListener';
 import { TradeOrder } from '@trading-tower/shared';
 import { BaseCoinbaseConnector } from './BaseCoinbaseConnector';
 
@@ -134,5 +135,25 @@ export class CoinbaseFuturesConnector extends BaseCoinbaseConnector implements I
     async getFuturesPositions(): Promise<any[]> {
         const response = await this.client.get('/api/v3/brokerage/cfm/positions');
         return response.data.positions;
+    }
+
+    async subscribeToOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        throw new Error('WebSocket order fills are not implemented for Coinbase Futures yet');
+    }
+
+    async unsubscribeFromOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        // No-op until WebSocket streaming is implemented
+    }
+
+    isWebSocketConnected(): boolean {
+        return false;
+    }
+
+    getWebSocketStatus(): WebSocketStatus {
+        return {
+            exchange: this.name,
+            isConnected: false,
+            subscriptionCount: 0
+        };
     }
 }

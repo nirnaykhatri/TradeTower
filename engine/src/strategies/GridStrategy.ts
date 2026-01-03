@@ -513,4 +513,25 @@ export class GridStrategy extends BaseStrategy<GridConfig> {
             }
         }
     }
+
+    /**
+     * Handle order cancellation event from WebSocket
+     * Removes the cancelled order from tracking maps
+     * @param orderId The exchange order ID
+     * @param pair The trading pair
+     */
+    async onOrderCancelled(orderId: string, pair: string): Promise<void> {
+        const wasBuyOrder = this.buyOrders.delete(orderId);
+        const wasSellOrder = this.sellOrders.delete(orderId);
+        
+        if (wasBuyOrder || wasSellOrder) {
+            console.log(
+                `[Bot ${this.bot.id}] Grid order ${orderId} cancelled and removed from ${
+                    wasBuyOrder ? 'buy' : 'sell'
+                } tracking`
+            );
+        } else {
+            console.log(`[Bot ${this.bot.id}] Cancelled order ${orderId} not found in tracking maps`);
+        }
+    }
 }

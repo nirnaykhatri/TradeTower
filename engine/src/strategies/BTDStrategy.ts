@@ -308,6 +308,21 @@ export class BTDStrategy extends BaseStrategy<BTDConfig> {
     }
 
     /**
+     * Handle order cancellation event from WebSocket
+     * Removes the cancelled order from activeOrders tracking map
+     * @param orderId The exchange order ID
+     * @param pair The trading pair
+     */
+    async onOrderCancelled(orderId: string, pair: string): Promise<void> {
+        const wasTracked = this.activeOrders.delete(orderId);
+        if (wasTracked) {
+            console.log(`[Bot ${this.bot.id}] BTD order ${orderId} cancelled and removed from tracking`);
+        } else {
+            console.log(`[Bot ${this.bot.id}] Cancelled order ${orderId} not found in tracking map`);
+        }
+    }
+
+    /**
      * Increase investment amount
      * 
      * When additional capital is added:

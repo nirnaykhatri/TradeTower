@@ -1,10 +1,13 @@
-import { IExchangeConnector, ExchangeBalance, TickerData } from '../interfaces/IExchangeConnector';
+import { IExchangeConnector, ExchangeBalance, TickerData, WebSocketStatus } from '../interfaces/IExchangeConnector';
+import { IOrderFillListener } from '../interfaces/IOrderFillListener';
 import { TradeOrder, RateLimiter, ExchangeRateLimiters } from '@trading-tower/shared';
 import { BaseCoinbaseConnector } from './BaseCoinbaseConnector';
+import { CoinbaseWebSocketManager } from './CoinbaseWebSocketManager';
 
 export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchangeConnector {
     public readonly name = 'Coinbase';
     protected readonly productType = 'SPOT';
+    private wsManager: CoinbaseWebSocketManager | null = null;
 
     constructor(apiKey: string, apiSecret: string) {
         super(apiKey, apiSecret, 'Coinbase');
@@ -188,5 +191,73 @@ export class CoinbaseConnector extends BaseCoinbaseConnector implements IExchang
             case 'OPEN': return 'open';
             default: return 'rejected';
         }
+    }
+
+    // ============ WebSocket Order Fill Subscriptions ============
+
+    /**
+     * Subscribe to receive order fill events via Coinbase WebSocket feed
+     * 
+     * Establishes a WebSocket connection to Coinbase Advanced Trade API
+     * and registers the listener for fill notifications on the specified pair.
+     * 
+     * @param pair Trading pair (e.g., "BTC/USD")
+     * @param listener Listener to notify on fill events
+     * @throws If WebSocket connection cannot be established
+     */
+    async subscribeToOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        // Lazily initialize WebSocket manager on first subscription
+        if (!this.wsManager) {
+            this.wsManager = new CoinbaseWebSocketManager(this.apiKey, this.apiSecret);
+        }
+
+        await this.wsManager.subscribeToOrderFills(pair, listener);
+    }
+
+    /**
+     * Unsubscribe from receiving order fill events for a pair
+     * 
+     * @param pair Trading pair (e.g., "BTC/USD")
+     * @param listener Listener to remove
+     */
+    async unsubscribeFromOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        if (!this.wsManager) return;
+
+        await this.wsManager.unsubscribeFromOrderFills(pair, listener);
+    }
+
+    /**
+     * Check if WebSocket connection is active and authenticated
+     * 
+     * @returns true if connected, false otherwise
+     */
+    isWebSocketConnected(): boolean {
+        if (!this.wsManager) return false;
+        return this.wsManager.isConnected();
+    }
+
+    /**
+     * Get detailed WebSocket connection status
+     * 
+     * @returns WebSocket status with connection details and metrics
+     */
+    getWebSocketStatus(): WebSocketStatus {
+        if (!this.wsManager) {
+            return {
+                isConnected: false,
+                exchange: this.name,
+                subscriptionCount: 0
+            };
+        }
+
+        const managerStatus = this.wsManager.getStatus();
+        return {
+            isConnected: managerStatus.isConnected,
+            exchange: this.name,
+            subscriptionCount: managerStatus.subscriptionCount,
+            lastEventTime: managerStatus.lastEventTime,
+            connectionUptime: managerStatus.connectionUptime,
+            reconnectionAttempts: managerStatus.reconnectAttempts
+        };
     }
 }

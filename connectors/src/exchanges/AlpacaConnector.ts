@@ -1,6 +1,8 @@
-import { IExchangeConnector, ExchangeBalance, TickerData } from '../interfaces/IExchangeConnector';
+import { IExchangeConnector, ExchangeBalance, TickerData, WebSocketStatus } from '../interfaces/IExchangeConnector';
+import { IOrderFillListener } from '../interfaces/IOrderFillListener';
 import { TradeOrder, RateLimiter, ExchangeRateLimiters } from '@trading-tower/shared';
 import { ExchangeError } from '../interfaces/ExchangeError';
+import { AlpacaWebSocketManager } from './AlpacaWebSocketManager';
 import axios, { AxiosInstance, AxiosError } from 'axios';
 
 export class AlpacaConnector implements IExchangeConnector {
@@ -8,8 +10,11 @@ export class AlpacaConnector implements IExchangeConnector {
     private api: AxiosInstance;
     private data: AxiosInstance;
     private rateLimiter: RateLimiter;
+    private wsManager: AlpacaWebSocketManager | null = null;
+    private readonly isPaper: boolean;
 
     constructor(private apiKey: string, private apiSecret: string, isPaper: boolean = true) {
+        this.isPaper = isPaper;
         const baseURL = isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
 
         const commonHeaders = {
@@ -196,6 +201,57 @@ export class AlpacaConnector implements IExchangeConnector {
             feeCurrency: 'USD',
             extendedHours: res.extended_hours,
             timestamp: res.created_at
+        };
+    }
+
+    // ============ WebSocket Order Fill Subscriptions ============
+
+    /**
+     * Subscribe to Alpaca trade_updates stream for order fills
+     */
+    async subscribeToOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        if (!this.wsManager) {
+            this.wsManager = new AlpacaWebSocketManager(this.apiKey, this.apiSecret, this.isPaper);
+        }
+        await this.wsManager.subscribeToOrderFills(pair, listener);
+    }
+
+    /**
+     * Unsubscribe listener from Alpaca trade_updates stream
+     */
+    async unsubscribeFromOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        if (!this.wsManager) return;
+        await this.wsManager.unsubscribeFromOrderFills(pair, listener);
+    }
+
+    /**
+     * Check WebSocket connection status
+     */
+    isWebSocketConnected(): boolean {
+        if (!this.wsManager) return false;
+        return this.wsManager.isConnected();
+    }
+
+    /**
+     * Get WebSocket status details
+     */
+    getWebSocketStatus(): WebSocketStatus {
+        if (!this.wsManager) {
+            return {
+                isConnected: false,
+                exchange: this.name,
+                subscriptionCount: 0
+            };
+        }
+
+        const status = this.wsManager.getStatus();
+        return {
+            isConnected: status.isConnected,
+            exchange: this.name,
+            subscriptionCount: status.subscriptionCount,
+            lastEventTime: status.lastEventTime,
+            connectionUptime: status.connectionUptime,
+            reconnectionAttempts: status.reconnectAttempts
         };
     }
 }

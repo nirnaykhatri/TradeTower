@@ -1,10 +1,21 @@
-import { BotInstance, ConfigurationError, validateRequired } from '@trading-tower/shared';
-import { ExchangeFactory } from '@trading-tower/connectors';
+import { BotInstance, ConfigurationError, validateRequired, TradeOrder } from '@trading-tower/shared';
+import { ExchangeFactory, IExchangeConnector } from '@trading-tower/connectors';
 import { IBotStrategy } from '../strategies/BaseStrategy';
 import { StrategyFactoryRegistry, strategyFactoryRegistry } from '../factory/StrategyFactory';
 import { ServiceBusSignalListener, SignalListenerConfig, ServiceBusSignalMessage } from './ServiceBusSignalListener';
 import { IndicatorScheduler, CandleDataProvider } from './IndicatorScheduler';
 import { ServiceBusSignalPublisher, PublisherConfig } from './ServiceBusSignalPublisher';
+import { missedFillRecoveryService } from './MissedFillRecoveryService';
+import { webSocketSubscriptionManager, WebSocketSubscriptionManager } from './WebSocketSubscriptionManager';
+
+/**
+ * Active bot tracking with strategy and exchange connector
+ */
+interface ActiveBot {
+    strategy: IBotStrategy;
+    exchange: IExchangeConnector;
+    pair: string;
+}
 
 /**
  * Bot Manager
@@ -12,10 +23,11 @@ import { ServiceBusSignalPublisher, PublisherConfig } from './ServiceBusSignalPu
  * Uses factory pattern for strategy creation
  */
 export class BotManager {
-    private activeBots: Map<string, IBotStrategy> = new Map();
+    private activeBots: Map<string, ActiveBot> = new Map();
     private signalListener?: ServiceBusSignalListener;
     private signalPublisher?: ServiceBusSignalPublisher;
     private indicatorScheduler?: IndicatorScheduler;
+    private subscriptionManager: WebSocketSubscriptionManager;
 
     /**
      * Creates a new BotManager instance
@@ -23,13 +35,16 @@ export class BotManager {
      * @param signalListenerConfig Optional Service Bus config for event-driven entry signals
      * @param publisherConfig Optional Service Bus config for publishing indicator signals
      * @param candleDataProvider Optional provider for loading candle data
+     * @param subscriptionManager Optional WebSocket subscription manager (for dependency injection)
      */
     constructor(
         private strategyRegistry: StrategyFactoryRegistry = strategyFactoryRegistry,
         private signalListenerConfig?: SignalListenerConfig,
         private publisherConfig?: PublisherConfig,
-        private candleDataProvider?: CandleDataProvider
+        private candleDataProvider?: CandleDataProvider,
+        subscriptionManager: WebSocketSubscriptionManager = webSocketSubscriptionManager
     ) {
+        this.subscriptionManager = subscriptionManager;
         console.log('[BotManager] Initialized with strategy registry');
     }
 
@@ -90,15 +105,15 @@ export class BotManager {
      */
     private async handleTradeViewSignal(message: ServiceBusSignalMessage): Promise<void> {
         try {
-            const strategy = this.activeBots.get(message.botId);
-            if (!strategy) {
+            const activeBot = this.activeBots.get(message.botId);
+            if (!activeBot) {
                 console.debug(`[BotManager] Received TV signal for inactive bot ${message.botId}, ignoring`);
                 return;
             }
 
             // Call strategy's signal handler if available
-            if ('onSignal' in strategy && typeof (strategy as any).onSignal === 'function') {
-                await (strategy as any).onSignal(message);
+            if ('onSignal' in activeBot.strategy && typeof (activeBot.strategy as any).onSignal === 'function') {
+                await (activeBot.strategy as any).onSignal(message);
             } else {
                 console.warn(`[BotManager] Strategy ${message.botId} doesn't support signal handling`);
             }
@@ -113,15 +128,15 @@ export class BotManager {
      */
     private async handleIndicatorSignal(message: ServiceBusSignalMessage): Promise<void> {
         try {
-            const strategy = this.activeBots.get(message.botId);
-            if (!strategy) {
+            const activeBot = this.activeBots.get(message.botId);
+            if (!activeBot) {
                 console.debug(`[BotManager] Received indicator signal for inactive bot ${message.botId}, ignoring`);
                 return;
             }
 
             // Call strategy's signal handler if available
-            if ('onSignal' in strategy && typeof (strategy as any).onSignal === 'function') {
-                await (strategy as any).onSignal(message);
+            if ('onSignal' in activeBot.strategy && typeof (activeBot.strategy as any).onSignal === 'function') {
+                await (activeBot.strategy as any).onSignal(message);
             } else {
                 console.warn(`[BotManager] Strategy ${message.botId} doesn't support signal handling`);
             }
@@ -188,8 +203,24 @@ export class BotManager {
             await strategy.initialize();
             await strategy.start();
 
-            // Register active bot
-            this.activeBots.set(bot.id, strategy);
+            // Subscribe to WebSocket order fill events with recovery on reconnect
+            const subscribed = await this.subscriptionManager.subscribeBot(
+                bot.id,
+                exchange,
+                bot.pair,
+                strategy
+            );
+
+            if (subscribed) {
+                // Set up missed fill recovery on WebSocket reconnection
+                strategy.onWebSocketConnected = async (exchangeName: string) => {
+                    console.log(`[BotManager] Bot ${bot.id} WebSocket reconnected - checking for missed fills`);
+                    await this.recoverMissedFills(bot.id, strategy, exchange, bot.pair);
+                };
+            }
+
+            // Register active bot with exchange reference
+            this.activeBots.set(bot.id, { strategy, exchange, pair: bot.pair });
 
             // Register for indicator evaluation if configured
             if (bot.config?.baseOrderCondition === 'INDICATOR' && bot.config?.entryIndicators && bot.config?.entryIndicators.length > 0 && this.indicatorScheduler) {
@@ -220,14 +251,17 @@ export class BotManager {
     public async stopBot(botId: string): Promise<void> {
         validateRequired(botId, 'botId');
 
-        const strategy = this.activeBots.get(botId);
-        if (!strategy) {
+        const activeBot = this.activeBots.get(botId);
+        if (!activeBot) {
             console.warn(`[BotManager] Bot ${botId} is not running`);
             return;
         }
 
         try {
-            await strategy.stop();
+            // Unsubscribe from WebSocket order fills
+            await this.subscriptionManager.unsubscribeBot(botId);
+
+            await activeBot.strategy.stop();
             this.activeBots.delete(botId);
 
             // Unregister from indicator scheduler
@@ -253,12 +287,12 @@ export class BotManager {
     public async pauseBot(botId: string): Promise<void> {
         validateRequired(botId, 'botId');
 
-        const strategy = this.activeBots.get(botId);
-        if (!strategy) {
+        const activeBot = this.activeBots.get(botId);
+        if (!activeBot) {
             throw new Error(`Bot ${botId} not found`);
         }
 
-        await strategy.pause();
+        await activeBot.strategy.pause();
         console.log(`[BotManager] Bot ${botId} paused`);
     }
 
@@ -270,12 +304,12 @@ export class BotManager {
     public async resumeBot(botId: string): Promise<void> {
         validateRequired(botId, 'botId');
 
-        const strategy = this.activeBots.get(botId);
-        if (!strategy) {
+        const activeBot = this.activeBots.get(botId);
+        if (!activeBot) {
             throw new Error(`Bot ${botId} not found`);
         }
 
-        await strategy.resume();
+        await activeBot.strategy.resume();
         console.log(`[BotManager] Bot ${botId} resumed`);
     }
 
@@ -286,7 +320,7 @@ export class BotManager {
      * @returns Bot strategy or undefined if not found
      */
     public getBot(botId: string): IBotStrategy | undefined {
-        return this.activeBots.get(botId);
+        return this.activeBots.get(botId)?.strategy;
     }
 
     /**
@@ -349,10 +383,84 @@ export class BotManager {
     }
 
     /**
+     * Recover missed fills for a bot after WebSocket reconnection
+     * @private
+     */
+    private async recoverMissedFills(
+        botId: string,
+        strategy: IBotStrategy,
+        exchange: IExchangeConnector,
+        pair: string
+    ): Promise<void> {
+        try {
+            // Get active orders from strategy
+            const activeOrders = this.getStrategyActiveOrders(strategy);
+            if (activeOrders.size === 0) {
+                console.log(`[BotManager] No active orders to recover for bot ${botId}`);
+                return;
+            }
+
+            // Query exchange for missed fills
+            const missedFills = await missedFillRecoveryService.recoverMissedFills(
+                botId,
+                exchange,
+                activeOrders,
+                pair
+            );
+
+            // Notify strategy of missed fills
+            for (const order of missedFills) {
+                if (order.status === 'filled' || order.filledAmount > 0) {
+                    console.log(
+                        `[BotManager] Replaying missed fill for bot ${botId}: ${order.id}`
+                    );
+                    await strategy.onOrderFilled(order);
+                } else if (order.status === 'canceled') {
+                    console.log(
+                        `[BotManager] Replaying missed cancellation for bot ${botId}: ${order.id}`
+                    );
+                    await strategy.onOrderCancelled(order.id, pair);
+                }
+            }
+        } catch (error) {
+            console.error(
+                `[BotManager] Failed to recover missed fills for bot ${botId}:`,
+                error
+            );
+            // Non-fatal, strategy continues with current state
+        }
+    }
+
+    /**
+     * Extract active orders from strategy (if available)
+     * @private
+     */
+    private getStrategyActiveOrders(strategy: IBotStrategy): Map<string, TradeOrder> {
+        // Try to get active orders from strategy
+        // Different strategies expose this differently, use duck typing
+        const strategyWithOrders = strategy as any;
+        
+        if (typeof strategyWithOrders.getActiveOrders === 'function') {
+            return strategyWithOrders.getActiveOrders();
+        }
+        
+        // Fallback: return empty map if strategy doesn't expose active orders
+        return new Map();
+    }    /**
      * Get supported strategy types
      */
     public getSupportedStrategies(): string[] {
         return this.strategyRegistry.getSupportedTypes();
+    }
+
+    /**
+     * Get WebSocket subscription health metrics
+     */
+    public getSubscriptionHealth(): {
+        totalSubscriptions: number;
+        subscriptionsByExchange: Map<string, number>;
+    } {
+        return this.subscriptionManager.getSubscriptionHealth();
     }
 }
 

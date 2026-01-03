@@ -867,6 +867,27 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
     }
 
     /**
+     * Handle order cancellation event from WebSocket
+     * Removes the cancelled order from activeOrders and safetyOrderMap tracking
+     * @param orderId The exchange order ID
+     * @param pair The trading pair
+     */
+    async onOrderCancelled(orderId: string, pair: string): Promise<void> {
+        const wasActive = this.activeOrders.delete(orderId);
+        const wasSafetyOrder = this.safetyOrderMap.delete(orderId);
+        
+        if (wasActive || wasSafetyOrder) {
+            console.log(
+                `[Bot ${this.bot.id}] DCA order ${orderId} cancelled and removed from ${
+                    wasSafetyOrder ? 'safety order' : 'active'
+                } tracking`
+            );
+        } else {
+            console.log(`[Bot ${this.bot.id}] Cancelled order ${orderId} not found in tracking maps`);
+        }
+    }
+
+    /**
      * Add funds to current DCA cycle
      * 
      * Per Bitsgap spec:

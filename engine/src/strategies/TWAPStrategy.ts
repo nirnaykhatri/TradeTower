@@ -146,4 +146,16 @@ export class TWAPStrategy extends BaseStrategy<TWAPConfig> {
             await this.stop();
         }
     }
+
+    /**
+     * Handle order cancellation event from WebSocket
+     * TWAP strategy doesn't maintain active order tracking, so this is a no-op
+     * @param orderId The exchange order ID
+     * @param pair The trading pair
+     */
+    async onOrderCancelled(orderId: string, pair: string): Promise<void> {
+        console.log(
+            `[Bot ${this.bot.id}] TWAP order ${orderId} cancelled - no tracking cleanup needed`
+        );
+    }
 }

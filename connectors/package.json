@@ -10,10 +10,12 @@
         "@trading-tower/shared": "*",
         "@types/crypto-js": "^4.2.2",
         "axios": "^1.6.7",
-        "crypto-js": "^4.2.0"
+        "crypto-js": "^4.2.0",
+        "ws": "^8.17.0"
     },
     "devDependencies": {
         "@types/node": "^25.0.3",
+        "@types/ws": "^8.5.10",
         "typescript": "^5.3.3"
     }
 }

@@ -1,4 +1,5 @@
-import { IExchangeConnector, ExchangeBalance, TickerData } from '../interfaces/IExchangeConnector';
+import { IExchangeConnector, ExchangeBalance, TickerData, WebSocketStatus } from '../interfaces/IExchangeConnector';
+import { IOrderFillListener } from '../interfaces/IOrderFillListener';
 import { TradeOrder, RateLimiter } from '@trading-tower/shared';
 import { ExchangeError } from '../interfaces/ExchangeError';
 import axios, { AxiosInstance, AxiosError } from 'axios';
@@ -190,5 +191,25 @@ export class IBKRConnector implements IExchangeConnector {
 
     async getOrder(orderId: string, symbol: string): Promise<TradeOrder> {
         throw new Error('Not implemented');
+    }
+
+    async subscribeToOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        throw new Error('WebSocket order fills are not implemented for IBKR yet');
+    }
+
+    async unsubscribeFromOrderFills(pair: string, listener: IOrderFillListener): Promise<void> {
+        // No-op until WebSocket streaming is implemented
+    }
+
+    isWebSocketConnected(): boolean {
+        return false;
+    }
+
+    getWebSocketStatus(): WebSocketStatus {
+        return {
+            exchange: this.name,
+            isConnected: false,
+            subscriptionCount: 0
+        };
     }
 }
