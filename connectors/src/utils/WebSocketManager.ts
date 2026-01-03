@@ -125,7 +125,7 @@ export abstract class WebSocketManager {
     
     // Connection state
     private state: WebSocketConnectionState = WebSocketConnectionState.DISCONNECTED;
-    protected ws: WebSocket | null = null;
+    protected websocket: WebSocket | null = null;
     
     // Reconnection tracking
     private reconnectAttempts: number = 0;
@@ -342,20 +342,20 @@ export abstract class WebSocketManager {
 
         return new Promise((resolve, reject) => {
             const url = this.getWebSocketUrl();
-            const ws = new WebSocket(url, {
+            const websocket = new WebSocket(url, {
                 headers: {
                     'User-Agent': this.config.userAgent
                 }
             });
 
             const connectionTimeout = setTimeout(() => {
-                ws.terminate();
+                websocket.terminate();
                 reject(new Error('Connection timeout'));
             }, this.config.connectionTimeoutMs);
 
-            ws.on('open', async () => {
+            websocket.on('open', async () => {
                 clearTimeout(connectionTimeout);
-                this.ws = ws;
+                this.websocket = websocket;
                 this.setState(WebSocketConnectionState.CONNECTED);
                 this.connectionStartTime = Date.now();
 
@@ -370,7 +370,7 @@ export abstract class WebSocketManager {
                 }
             });
 
-            ws.on('message', async (data: WebSocket.RawData) => {
+            websocket.on('message', async (data: WebSocket.RawData) => {
                 try {
                     await this.onMessage(data);
                 } catch (error) {
@@ -379,7 +379,7 @@ export abstract class WebSocketManager {
                 }
             });
 
-            ws.on('error', (error) => {
+            websocket.on('error', (error) => {
                 clearTimeout(connectionTimeout);
                 console.error(`[${this.exchangeName}] WebSocket error:`, error);
                 this.setState(WebSocketConnectionState.ERROR);
@@ -387,7 +387,7 @@ export abstract class WebSocketManager {
                 reject(error);
             });
 
-            ws.on('close', () => {
+            websocket.on('close', () => {
                 clearTimeout(connectionTimeout);
                 console.log(`[${this.exchangeName}] WebSocket closed`);
                 this.stopHeartbeat();
@@ -410,9 +410,9 @@ export abstract class WebSocketManager {
         this.stopHeartbeat();
         this.cancelReconnect();
 
-        if (this.ws) {
-            this.ws.close();
-            this.ws = null;
+        if (this.websocket) {
+            this.websocket.close();
+            this.websocket = null;
         }
         this.setState(WebSocketConnectionState.CLOSED);
     }
@@ -592,11 +592,11 @@ export abstract class WebSocketManager {
 
         const heartbeatInterval = this.config.heartbeatIntervalMs;
         this.heartbeatInterval = setInterval(() => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
                 // Only ping if no recent message activity (optimization)
                 const timeSinceLastEvent = this.lastEventTime ? Date.now() - this.lastEventTime : Infinity;
                 if (timeSinceLastEvent > heartbeatInterval) {
-                    this.ws.ping();
+                    this.websocket.ping();
                 }
             }
         }, heartbeatInterval);

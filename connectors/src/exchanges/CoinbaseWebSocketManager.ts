@@ -115,7 +115,7 @@ export class CoinbaseWebSocketManager extends WebSocketManager {
      * Subscribe to Coinbase user channel for a specific product
      */
     private async subscribeToCoinbaseChannel(productId: string): Promise<void> {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
             throw new Error('WebSocket not connected');
         }
 
@@ -138,7 +138,7 @@ export class CoinbaseWebSocketManager extends WebSocketManager {
             signature: signature
         };
 
-        this.ws.send(JSON.stringify(subscribeMessage));
+        this.websocket.send(JSON.stringify(subscribeMessage));
         console.log(`[${this.exchangeName}] Subscribed to user channel for ${productId}`);
     }
 
@@ -354,7 +354,7 @@ export class CoinbaseWebSocketManager extends WebSocketManager {
      * Unsubscribe from Coinbase user channel for a specific product
      */
     private async unsubscribeFromCoinbaseChannel(productId: string): Promise<void> {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
             return;
         }
 
@@ -364,7 +364,7 @@ export class CoinbaseWebSocketManager extends WebSocketManager {
             channel: 'user'
         };
 
-        this.ws.send(JSON.stringify(unsubscribeMessage));
+        this.websocket.send(JSON.stringify(unsubscribeMessage));
         console.log(`[${this.exchangeName}] Unsubscribed from user channel for ${productId}`);
     }
 }

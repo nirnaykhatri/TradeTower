@@ -46,6 +46,9 @@ export interface BotPerformance {
 
 export type BotClosureStrategy = 'CLOSE_POSITIONS' | 'CANCEL_ORDERS' | 'LIQUIDATE';
 
+// Export bot status enum for type-safe state management
+export { BotStatus, isBotStatus } from './types/BotStatus';
+
 export interface BotInstance {
     id: string; // Unique bot ID
     userId: string; // Partition key

@@ -756,31 +756,550 @@ Combines DCA-based entry strategy with Grid-based profit-taking strategy. The bo
 
 ---
 
-## 5. **Loop Bot**
+## 5. **Loop Bot (Recurring Buy/Sell Grid)**
 
 ### Overview
-Continuously loops between buy and sell within a price range. Ideal for ranging markets.
+
+The Loop Bot is an automated position trading strategy designed for the spot market that continuously cycles between buying and selling within a predefined price range. Unlike traditional grid strategies that replace orders symmetrically, the Loop Bot operates around a **fixed Entry Price** that serves as the anchor point for the entire grid structure throughout the bot's lifetime.
+
+**Core Principle**: The Loop Bot creates a recurring trading cycle by placing buy orders below and sell orders above the fixed Entry Price. When a sell order fills above the Entry Price, the bot places a new buy order below the Entry Price using the full proceeds. When a buy order fills, it immediately creates a gap-filling sell order or expands the grid upward, ensuring continuous market participation without manual intervention.
+
+**Key Innovation**: The strategy implements intelligent **gap-filling priority logic** that fills empty price levels before expanding the grid, maintaining a consistent total order count and optimal capital efficiency.
+
+**Ideal Use Cases**:
+- Range-bound markets with predictable oscillation patterns
+- Long-term position trading with automatic profit compounding
+- Volatile markets where prices fluctuate within defined boundaries
+- Diversified strategies earning profits in both base and quote currencies
+
+### When to Use the Loop Bot
+
+Use the Loop Bot when:
+- You expect price to oscillate within a predictable range over an extended period
+- You want to accumulate base currency while generating quote currency profits
+- You prefer a hands-off approach with automatic profit reinvestment
+- You're comfortable with spot market position building without stop loss protection
+- You want flexibility to exit in either base or quote currency based on market conditions
+
+**Not Recommended For**:
+- Strong trending markets (sustained uptrend or downtrend)
+- Low liquidity pairs with wide spreads
+- Short-term trading strategies requiring tight stop losses
+- Strategies requiring precise entry/exit timing
 
 ### Configuration Fields
 
-| Field | Type | Required | Description | Validation |
-|-------|------|----------|-------------|------------|
-| `exchange` | String | Yes | Selected exchange/broker | Must be connected |
-| `pair` | String | Yes | Trading pair | Valid pair on exchange |
-| `investment` | Decimal | Yes | Total investment | > 0 |
-| `lowPrice` | Decimal | Yes | Lower price boundary | > 0, < highPrice |
-| `highPrice` | Decimal | Yes | Upper price boundary | > lowPrice |
-| `orderDistance` | Decimal | Yes | Distance between orders (%) | 0.1-50 |
-| `orderCount` | Integer | Yes | Number of loop orders | 1-100 |
-| `takeProfit` | Decimal | No | Per-order profit target (%) | 0.1-100 |
-| `takeProfitEnabled` | Boolean | No | Enable TP per order | Default: false |
+| Field | Type | Required | Description | Validation | Notes |
+|-------|------|----------|-------------|------------|-------|
+| `exchange` | String | Yes | Selected exchange/broker | Must be connected | Spot trading only |
+| `pair` | String | Yes | Trading pair | Valid pair on exchange | e.g., BTC/USDT, ETH/USDC |
+| `investment` | Decimal | Yes | Total investment amount | > 0, <= available balance | Total capital allocated to this bot |
+| `lowPrice` | Decimal | Yes | Lower price boundary | > 0, < entryPrice | Minimum price for buy order placement |
+| `highPrice` | Decimal | No | Upper price boundary | > entryPrice | Maximum price for sell order placement (optional) |
+| `orderDistance` | Decimal | Yes | Distance between orders (%) | 0.1-50 | Percentage step between consecutive grid levels |
+| `orderCount` | Integer | Yes | Number of grid orders | 10-40 | Total orders distributed above and below Entry Price |
+| `reinvestProfit` | Boolean | No | Enable profit reinvestment | Default: false | Automatically reinvest profits into larger positions |
+| `reinvestProfitPercent` | Decimal | No | % of profit to reinvest | 0-100 (if enabled) | 0=no reinvestment, 100=full compounding |
+| `takeProfitType` | Enum | No | Take profit trigger type | `TOTAL_PNL_PERCENT`, `PRICE_TARGET` | How to measure TP condition |
+| `takeProfitPercent` | Decimal | No | Target profit % (Total PnL) | 0.1-1000 | Close bot when total profit reaches this % |
+| `takeProfitPrice` | Decimal | No | Target exit price | > 0 | Close bot when price reaches this level |
+| `exitCurrency` | Enum | No | Exit position in currency | `BASE`, `QUOTE`, `BOTH` | Which currency to hold upon TP trigger |
 
-### Execution Logic
-1. Divide investment across `orderCount` orders
-2. Place buy orders evenly spaced by `orderDistance`
-3. When buy fills → immediately place sell at +`takeProfit` %
-4. When sell fills → place new buy order
-5. Loop indefinitely until manual stop
+### How It Works
+
+#### Fixed Entry Price Anchor
+
+The Entry Price is **set once at bot launch** based on the current market price and **never changes** during the bot's operation. This fixed anchor provides several critical benefits:
+
+- **Consistent Reference Point**: All buy and sell orders are calculated relative to this price
+- **Predictable Profit Calculation**: Each sell above Entry Price generates profit; each buy below builds position
+- **Grid Stability**: The structure remains coherent regardless of market movement
+- **Performance Tracking**: Easy to measure bot effectiveness relative to initial conditions
+
+**Example**:
+```
+Launch Configuration:
+- Pair: BTC/USDT
+- Entry Price: 50,000 USDT (locked at launch)
+- Investment: 10,000 USDT
+- High Price: 52,500 USDT
+- Low Price: 47,500 USDT
+- Order Distance: 1%
+- Order Count: 10 (5 up, 5 down initially)
+
+Grid Structure at Launch:
+Sell Orders (Above Entry):
+  50,500 USDT (+1%)
+  51,005 USDT (+2%)
+  51,515 USDT (+3%)
+  52,030 USDT (+4%)
+  52,550 USDT (+5%) ← Near high price limit
+
+Entry Price: 50,000 USDT ← Fixed anchor
+
+Buy Orders (Below Entry):
+  49,500 USDT (-1%)
+  49,005 USDT (-2%)
+  48,515 USDT (-3%)
+  48,030 USDT (-4%)
+  47,550 USDT (-5%) ← Near low price limit
+```
+
+#### Gap-Filling Priority Logic
+
+The Loop Bot implements intelligent order placement that prioritizes filling gaps in the grid before expanding to new price levels:
+
+**When a SELL Order Fills**:
+1. **Check for Buy Gaps**: Scan all known price levels below Entry Price
+2. **Fill Farthest Gap First**: Place buy order at lowest price gap (farthest from Entry Price)
+3. **Expand Downward** (if no gaps): Create new buy level below existing orders
+4. **Respect Boundaries**: Never place orders below `lowPrice` limit
+
+**When a BUY Order Fills**:
+1. **Check for Sell Gaps**: Scan all known price levels above Entry Price
+2. **Fill Farthest Gap First**: Place sell order at highest price gap (farthest from Entry Price)
+3. **Expand Upward** (if no gaps): Create new sell level above existing orders
+4. **Respect Boundaries**: Never place orders above `highPrice` limit (if set)
+
+**Why Gap-Filling Matters**:
+- ✅ Maintains uniform grid density across the entire price range
+- ✅ Maximizes capital efficiency by keeping all invested funds active
+- ✅ Prevents grid fragmentation during volatile market conditions
+- ✅ Ensures consistent profit capture at all price levels
+- ✅ Total order count remains constant (no runaway grid expansion)
+
+**Example - Gap Detection & Filling**:
+```
+Current State:
+Sell Orders Active: 50,500 | 51,515 | 52,550
+Missing (Gaps): 51,005 | 52,030
+Buy Orders Active: 49,500 | 48,515 | 47,550
+Missing (Gaps): 49,005 | 48,030
+
+Scenario 1: Sell fills at 50,500
+→ Bot detects sell gap at 51,005 (closer to Entry)
+→ Bot detects sell gap at 52,030 (farther from Entry)
+→ ACTION: Place buy order at 47,550 (existing lowest)
+→ But wait! No buy gaps exist below entry
+→ ACTION: Expand downward to 47,050 (-5.9%)
+
+Scenario 2: Buy fills at 49,500
+→ Bot detects sell gaps at 51,005 and 52,030
+→ ACTION: Place sell order at 52,030 (farthest gap from Entry)
+→ Gap-filled! Grid density restored
+```
+
+#### Profit Reinvestment & Compounding
+
+The Loop Bot supports automatic profit reinvestment to compound returns over time:
+
+**How Reinvestment Works**:
+1. **Calculate Profit**: When a sell order fills, calculate profit = `(sellPrice - buyPrice) × amount`
+2. **Apply Reinvestment %**: Multiply profit by `reinvestProfitPercent` (e.g., 100% = full reinvestment)
+3. **Increase Position Size**: Add reinvested profit to the buy order cost
+4. **Larger Orders**: Next buy order uses `newAmount = (originalCost + reinvestedProfit) / buyPrice`
+5. **Compound Growth**: Each cycle increases position size proportionally
+
+**Reinvestment Example**:
+```
+Initial Cycle:
+- Buy: 0.2 BTC at 49,500 USDT = 9,900 USDT
+- Sell: 0.2 BTC at 50,500 USDT = 10,100 USDT
+- Profit: 200 USDT
+- Reinvest %: 100%
+
+Next Cycle:
+- New Buy Amount: (9,900 + 200) / 49,500 = 0.204 BTC
+- Position grows by 2% each successful cycle
+- After 10 cycles: 0.2 × (1.02^10) ≈ 0.244 BTC (+22%)
+```
+
+**Configuration Options**:
+- **0% Reinvestment**: Pure profit extraction; position size remains constant
+- **50% Reinvestment**: Half profits withdrawn, half reinvested (balanced)
+- **100% Reinvestment**: Full compounding; maximum growth potential
+
+### Key Features & Operational Mechanics
+
+#### 🎯 Fixed Entry Price Strategy
+
+**Entry Price Determination**:
+- **Automatic**: Set to current market price when bot is confirmed and started
+- **Immutable**: Never recalculates regardless of market movement
+- **Reference Point**: All grid calculations use this price as the anchor
+
+**Impact on Grid Structure**:
+- Buy orders placed at `entryPrice × (1 - orderDistance × i)` for i = 1 to orderCount/2
+- Sell orders placed at `entryPrice × (1 + orderDistance × i)` for i = 1 to orderCount/2
+- Grid remains centered on Entry Price even if market moves significantly
+
+**When Entry Price May Not Be Current Price**:
+- If you restart a Loop Bot from history, Entry Price may differ from current market price
+- Bot adapts by placing orders relative to the original Entry Price
+- May require manual adjustment if price has moved significantly since last run
+
+#### 📊 Order Lifecycle & Execution Flow
+
+**Initialization Phase**:
+1. Record current market price as fixed Entry Price
+2. Calculate `investmentPerSlice = investment / orderCount`
+3. Place initial buy orders below Entry Price (up to orderCount/2)
+4. Place initial sell orders above Entry Price (up to orderCount/2)
+5. Track all price levels in `allKnownLevels` set (max 500 levels for safety)
+
+**Active Trading Phase** - Buy Order Fills:
+1. Remove filled buy order from `activeOrders` tracking
+2. Increment `totalTrades` counter
+3. Calculate next sell price using gap-filling logic
+4. Place sell order with amount from filled buy
+5. Map sell order ID → original buy price for profit calculation
+
+**Active Trading Phase** - Sell Order Fills:
+1. Remove filled sell order from `activeOrders` tracking
+2. Retrieve original buy price from `orderMap`
+3. Calculate profit: `(sellPrice - buyPrice) × amount`
+4. Add profit to `botProfit` performance metric
+5. If reinvestment enabled: Calculate new amount with reinvested profit
+6. Calculate next buy price using gap-filling logic
+7. Place buy order at determined price level
+8. Delete order from `orderMap` (cleanup)
+
+**Order Cancellation Handling**:
+- Remove order from `activeOrders` map
+- Remove order from `orderMap` if present
+- Clear order ID from `gridLevels` tracking
+- Log cancellation event for audit trail
+- **Note**: Manual cancellations may create gaps; bot will fill them on next cycle
+
+#### 🔄 Automatic Profit Compounding
+
+**Profit Calculation Formula**:
+```typescript
+// For each sell order that fills:
+const originalBuyPrice = orderMap.get(sellOrder.id);
+const tradeRevenue = sellOrder.amount × sellOrder.price;
+const tradeCost = sellOrder.amount × originalBuyPrice;
+const tradeProfit = tradeRevenue - tradeCost;
+
+// Apply reinvestment percentage:
+const reinvestPercent = config.reinvestProfitPercent ?? 100;
+const reinvestProfit = tradeProfit × (reinvestPercent / 100);
+
+// Calculate new position size:
+const newAmount = (tradeCost + reinvestProfit) / originalBuyPrice;
+
+// Result: newAmount > original amount (compounding effect)
+```
+
+**Long-Term Impact**:
+- **Geometric Growth**: Position size grows exponentially with successful cycles
+- **Risk Consideration**: Larger positions mean larger exposure during downturns
+- **Balance Management**: Ensure sufficient quote currency for expanded buy orders
+- **Profit Extraction**: Consider setting `reinvestProfitPercent < 100%` to withdraw some profits
+
+#### 🛡️ Safety Mechanisms & Limits
+
+**MAX_KNOWN_LEVELS Constraint** (500 levels):
+- Prevents unbounded memory growth in `allKnownLevels` set
+- Limits grid expansion in extreme market volatility
+- Warning logged when limit reached; grid stops expanding
+- Existing orders continue functioning normally
+- **Action Required**: Stop and restart bot with adjusted parameters if limit hit
+
+**Price Boundary Enforcement**:
+- **Low Price**: Buy orders never placed below this threshold
+- **High Price**: Sell orders never placed above this threshold (if configured)
+- Protects against runaway grid expansion in trending markets
+- Provides predictable capital exposure limits
+
+**Insufficient Funds Handling**:
+- If balance insufficient for next order, order placement fails gracefully
+- Bot continues monitoring active orders
+- Logs error for user notification
+- **Recovery**: Add funds to exchange; bot resumes on next fill event
+
+### Take Profit & Exit Strategies
+
+#### Take Profit Configuration Options
+
+The Loop Bot supports flexible take profit configurations:
+
+| Take Profit Type | Description | When to Use | Example |
+|------------------|-------------|-------------|---------|
+| **Total PnL Percent** | Close when total profit reaches % of investment | Long-term profit target | TP = 20% → Close when profit = 2,000 USDT on 10,000 USDT investment |
+| **Price Target** | Close when market price reaches specific level | Directional price expectation | TP = 55,000 → Close when BTC reaches 55k regardless of profit |
+| **Manual Exit** | No automatic TP; user stops manually | Indefinite operation | No TP set → Bot runs until manual stop |
+
+**Exit Currency Selection**:
+
+When Take Profit is triggered, you can choose how to finalize your positions:
+
+- **Convert to Base Currency**: 
+  - Sells all quote currency holdings at market price to buy base currency
+  - **Use Case**: You expect base currency (e.g., BTC) to appreciate long-term
+  - **Result**: Final position = maximum BTC holdings
+
+- **Convert to Quote Currency**:
+  - Sells all base currency holdings at market price to quote currency
+  - **Use Case**: You want to lock profits in stable currency (e.g., USDT)
+  - **Result**: Final position = initial investment + profits in USDT
+
+- **Keep Base and Quote Currency** (Default):
+  - Cancels all open orders without executing additional trades
+  - Transfers both base and quote balances back to your account
+  - **Use Case**: You want flexibility to manually manage final positions
+  - **Result**: Mixed position reflecting current grid state
+
+#### Bot Profit vs. Position PnL
+
+The Loop Bot's profit accounting differs from other strategies due to automatic reinvestment:
+
+**Bot Profit Metric**:
+- **Definition**: Sum of all realized profits from completed sell orders
+- **Calculation**: Σ (sellPrice - buyPrice) × amount for all fills
+- **Display**: May show as 0 or low value due to automatic reinvestment
+- **Reality**: Profits are reinvested into larger positions, not withdrawn
+
+**Position Value Tracking**:
+- **Base Currency Holdings**: Increases over time as buy orders fill
+- **Quote Currency Holdings**: Fluctuates as orders cycle
+- **Total Position Value**: `(baseAmount × currentPrice) + quoteAmount`
+- **True Profit**: Compare current position value to original investment
+
+**Why Bot Profit Appears Low**:
+```
+Example After 50 Trades:
+- Bot Profit Display: 150 USDT
+- Reason: Only tracking incremental profit per reinvestment cycle
+- Reality: Original 0.2 BTC position now 0.35 BTC (+75% growth)
+- True Profit: (0.35 × 50,000) - 10,000 = 7,500 USDT
+```
+
+**Tracking True Performance**:
+1. Monitor base currency accumulation (quantity growth)
+2. Calculate position value at current price
+3. Compare to original investment amount
+4. Consider reinvested profits as part of position value
+
+### Quick Setup Presets
+
+| Preset | Duration | Order Distance | Order Count | Investment Split | Best For |
+|--------|----------|----------------|-------------|------------------|----------|
+| **Short-term** | Up to 3 days | 0.5% | 20-30 | 50% buy / 50% sell | High frequency, tight ranges, active monitoring |
+| **Mid-term** | 7 days | 1.0% | 15-25 | 60% buy / 40% sell | Balanced approach, moderate volatility |
+| **Long-term** | 25+ days | 2-3% | 10-20 | 70% buy / 30% sell | Position accumulation, wide ranges, hands-off |
+
+**Order Count Considerations**:
+- **Minimum 10 orders**: Provides sufficient grid density for cycling
+- **Maximum 40 orders**: Prevents over-fragmentation and excessive order management
+- **Recommended 15-25 orders**: Optimal balance of coverage and simplicity
+
+**Order Distance Guidelines**:
+- **High Volatility** (>5% daily): Use 1.5-3.0% distance to reduce churn
+- **Medium Volatility** (2-5% daily): Use 0.8-1.5% distance for balanced trading
+- **Low Volatility** (<2% daily): Use 0.3-0.8% distance for frequent fills
+
+### Bot Management Operations
+
+#### Modifying Active Loop Bot
+
+**Not Supported**:
+- ❌ Cannot add funds to running Loop Bot (reinvestment handles growth)
+- ❌ Cannot adjust Entry Price (fixed at launch)
+- ❌ Cannot change order count dynamically
+- ❌ Cannot modify order distance while running
+- ❌ No Stop Loss feature available
+
+**Supported Modifications**:
+- ✅ Adjust Take Profit settings (Total % PnL or Price Target)
+- ✅ Change exit currency preference
+- ✅ Enable/disable profit reinvestment
+- ✅ Modify reinvestment percentage
+
+**How to Modify**:
+1. Navigate to active bot in dashboard
+2. Click "Bot Actions" → "Modify Bot"
+3. Update only Take Profit or reinvestment settings
+4. Confirm changes; applies to future fills immediately
+
+#### Stopping the Loop Bot
+
+When you stop a Loop Bot, you have three closure strategies:
+
+| Strategy | Execution | Final Position | Use Case |
+|----------|-----------|----------------|----------|
+| **Convert to Base Currency** | Market sell all quote currency | Maximum base currency | Expect base currency appreciation |
+| **Convert to Quote Currency** | Market sell all base currency | Maximum quote currency | Lock profits in stable currency |
+| **Keep Base and Quote Currency** | Cancel all orders, no trades | Mixed position | Manual management preferred |
+
+**Execution Steps**:
+1. Bot status changes to "stopped"
+2. All active orders canceled immediately
+3. If conversion strategy selected:
+   - Place market order to convert holdings
+   - Wait for fill confirmation
+   - Calculate final PnL
+4. Transfer balances back to exchange account
+5. Bot moves to history with final performance summary
+
+#### Restarting from History
+
+**Important Considerations**:
+- **New Entry Price**: Restarting creates a new Entry Price at current market price
+- **Position Reset**: Previous position state is not preserved
+- **Configuration Reuse**: All other settings (orderDistance, orderCount, etc.) are copied
+- **Investment**: Uses original investment amount unless manually adjusted
+
+**When to Restart**:
+- Market returns to original range after strong trend
+- Want to reuse proven configuration with new Entry Price
+- Need to adjust parameters after reviewing performance
+
+**Restart Process**:
+1. Navigate to History tab in bot dashboard
+2. Select completed Loop Bot
+3. Click "Bot Actions" → "Restart"
+4. Review and adjust configuration if needed
+5. Confirm to create new bot instance with current market price as Entry Price
+
+### Risk Management & Considerations
+
+#### Market-Driven Risks
+
+**Strong Trending Markets**:
+- **Risk**: If price trends strongly upward, bot depletes quote currency buying all the way up
+- **Impact**: All capital converted to base currency; no quote left for further buys
+- **Mitigation**: Set conservative `highPrice` boundary; monitor market conditions
+
+**Strong Downtrend**:
+- **Risk**: If price trends strongly downward, bot accumulates base currency continuously
+- **Impact**: All capital converted to depreciating base currency
+- **Mitigation**: Set conservative `lowPrice` boundary; consider manual stop if trend confirmed
+
+**Low Liquidity**:
+- **Risk**: Orders may not fill at desired prices due to wide spreads
+- **Impact**: Grid becomes inefficient; profit margins eroded by slippage
+- **Mitigation**: Choose high-volume pairs; use wider orderDistance in illiquid markets
+
+**Extreme Volatility**:
+- **Risk**: Rapid price swings may fill all orders on one side quickly
+- **Impact**: Grid imbalance; large position exposure in one direction
+- **Mitigation**: Use wider orderDistance; set conservative price boundaries
+
+#### Loop Bot Specific Limitations
+
+**No Stop Loss Protection**:
+- Loop Bot does **not support stop loss** features
+- If price moves beyond grid boundaries, position remains open
+- **Consideration**: Only use with capital you can afford to hold long-term
+- **Alternative**: Set Take Profit at price target to exit if conditions deteriorate
+
+**Automatic Reinvestment Lock-In**:
+- Reinvested profits increase position size; cannot be withdrawn until bot stops
+- **Consideration**: Set reinvestProfitPercent < 100% to extract some profits during operation
+- **Planning**: Decide on profit extraction strategy before starting bot
+
+**Capital Efficiency vs. Coverage**:
+- Wider orderDistance → fewer orders, larger position per order, less frequent fills
+- Tighter orderDistance → more orders, smaller position per order, more frequent fills
+- **Consideration**: Balance coverage with minimum order size requirements
+
+#### Best Practices
+
+1. **Start Conservative**:
+   - Use smaller investment (20-30% of total capital) for first Loop Bot
+   - Choose established, high-volume pairs (BTC/USDT, ETH/USDT)
+   - Set wide price boundaries (±20-30% from Entry Price)
+
+2. **Monitor Regularly**:
+   - Check position balance (base vs. quote currency) weekly
+   - Review fill frequency and profit per cycle
+   - Adjust orderDistance if grid too tight or too sparse
+
+3. **Choose Appropriate Ranges**:
+   - Historical volatility analysis: Review 30-90 day price range
+   - Set `lowPrice` and `highPrice` within 80% of historical range
+   - Allow 20% buffer for unexpected movements
+
+4. **Profit Extraction Strategy**:
+   - **Aggressive Growth**: 100% reinvestment, no Take Profit
+   - **Balanced**: 50% reinvestment + Take Profit at 20% total profit
+   - **Conservative**: 0% reinvestment + Take Profit at 10-15% total profit
+
+5. **Pair Selection**:
+   - ✅ High volume (>$50M daily) and tight spreads (<0.1%)
+   - ✅ Established cryptocurrencies with predictable ranges
+   - ✅ Pairs with mean-reverting behavior (oscillation patterns)
+   - ❌ Avoid: Low-liquidity altcoins, trending meme coins, highly volatile tokens
+
+### Performance Monitoring
+
+#### Key Metrics
+
+**Position Metrics**:
+- **Base Currency Holdings**: Current quantity of base asset (e.g., BTC)
+- **Quote Currency Holdings**: Current quantity of quote asset (e.g., USDT)
+- **Position Value**: `(baseHoldings × currentPrice) + quoteHoldings`
+- **Investment Growth**: `((positionValue - originalInvestment) / originalInvestment) × 100%`
+
+**Trading Activity**:
+- **Total Trades**: Count of completed buy/sell cycles
+- **Average Profit Per Cycle**: `totalProfit / (totalTrades / 2)` (each cycle = 1 buy + 1 sell)
+- **Fill Frequency**: Average time between order fills
+- **Trading Time**: Duration since bot started
+
+**Grid Status**:
+- **Active Buy Orders**: Number and total value of pending buys
+- **Active Sell Orders**: Number and total value of pending sells
+- **Known Levels**: Count of price levels tracked (max 500)
+- **Grid Coverage**: Price range of active orders vs. configured boundaries
+
+**Profit Tracking**:
+- **Realized Profit**: Sum of completed sell order profits
+- **Reinvested Amount**: Cumulative profit reinvested into position
+- **Position Growth**: Change in base currency holdings since start
+- **Unrealized PnL**: Current position value vs. weighted average cost basis
+
+#### Order History & Analysis
+
+**Completed Trades View**:
+- **Time**: Timestamp of order fill
+- **Side**: Buy or Sell
+- **Price**: Execution price
+- **Amount**: Quantity filled
+- **Total**: Price × Amount
+- **Fee**: Exchange trading fee
+- **Profit**: For sells only: (sellPrice - buyPrice) × amount
+
+**Active Orders View**:
+- **Price Level**: Order price
+- **Side**: Buy or Sell
+- **Amount**: Order quantity
+- **Status**: Open, Partially Filled, Pending
+- **Distance from Entry**: % above or below Entry Price
+- **Time Since Placed**: Age of order
+
+**Performance Charts**:
+- **Position Value Over Time**: Line chart of total position value
+- **Base/Quote Allocation**: Pie chart of holdings distribution
+- **Profit by Cycle**: Bar chart of profit per completed cycle
+- **Order Fill Distribution**: Heatmap of fill prices relative to Entry Price
+
+#### Success Indicators
+
+**Healthy Loop Bot Signs**:
+- ✅ Regular order fills on both buy and sell sides (balanced activity)
+- ✅ Steady increase in base currency holdings (if reinvestment enabled)
+- ✅ Position value growing faster than market price (outperformance)
+- ✅ Grid coverage remains within configured boundaries (no runaway expansion)
+- ✅ No warnings about MAX_KNOWN_LEVELS limit (grid size under control)
+
+**Warning Signs**:
+- ⚠️ All orders filling on one side only (trending market breaking grid)
+- ⚠️ Position heavily imbalanced (90%+ in base or quote)
+- ⚠️ Fill frequency decreasing over time (market moving away from grid)
+- ⚠️ Approaching MAX_KNOWN_LEVELS limit (grid too fragmented)
+- ⚠️ Insufficient funds errors (balance depleted; cannot place new orders)
 
 ---
 

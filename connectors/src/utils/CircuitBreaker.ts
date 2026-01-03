@@ -40,13 +40,19 @@ export interface CircuitBreakerConfig {
      * Number of successful calls needed to close circuit from half-open
      */
     successThreshold: number;
+
+    /**
+     * Maximum number of failure timestamps to keep (prevents unbounded growth)
+     */
+    maxFailureHistorySize?: number;
 }
 
 export const DEFAULT_CIRCUIT_BREAKER_CONFIG: CircuitBreakerConfig = {
     failureThreshold: 5,
     failureWindowMs: 60000, // 1 minute
     resetTimeoutMs: 30000,  // 30 seconds
-    successThreshold: 2
+    successThreshold: 2,
+    maxFailureHistorySize: 100  // Prevent unbounded array growth
 };
 
 export class CircuitBreakerError extends Error {
@@ -121,6 +127,12 @@ export class CircuitBreaker {
         this.successCount = 0;
 
         this.cleanupOldFailures();
+
+        // Enforce max history size to prevent unbounded growth
+        const maxSize = this.config.maxFailureHistorySize || 100;
+        if (this.failureTimestamps.length > maxSize) {
+            this.failureTimestamps = this.failureTimestamps.slice(-maxSize);
+        }
 
         // Count recent failures within window
         const recentFailures = this.failureTimestamps.filter(

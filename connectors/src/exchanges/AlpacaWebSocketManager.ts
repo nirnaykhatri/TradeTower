@@ -54,8 +54,8 @@ export class AlpacaWebSocketManager extends WebSocketManager {
      * Authenticate with Alpaca stream and subscribe to trade_updates
      */
     protected async authenticate(): Promise<void> {
-        const ws = this.ws;
-        if (!ws) throw new Error('WebSocket not initialized');
+        const websocket = this.websocket;
+        if (!websocket) throw new Error('WebSocket not initialized');
 
         await new Promise<void>((resolve, reject) => {
             const timeout = setTimeout(() => {
@@ -76,11 +76,11 @@ export class AlpacaWebSocketManager extends WebSocketManager {
                         if (msg.data?.status === 'authorized') {
                             // Auth success, now subscribe
                             clearTimeout(timeout);
-                            ws.off('message', onMessage);
+                            websocket.off('message', onMessage);
                             this.subscribeStream().then(resolve).catch(reject);
                         } else {
                             clearTimeout(timeout);
-                            ws.off('message', onMessage);
+                            websocket.off('message', onMessage);
                             reject(new Error(`Alpaca auth failed: ${msg.data?.status}`));
                         }
                     }
@@ -90,7 +90,7 @@ export class AlpacaWebSocketManager extends WebSocketManager {
                 }
             };
 
-            ws.on('message', onMessage);
+            websocket.on('message', onMessage);
 
             const authPayload = {
                 action: 'authenticate',
@@ -99,7 +99,7 @@ export class AlpacaWebSocketManager extends WebSocketManager {
                     secret_key: this.apiSecret
                 }
             };
-            ws.send(JSON.stringify(authPayload));
+            websocket.send(JSON.stringify(authPayload));
         });
     }
 
@@ -107,14 +107,14 @@ export class AlpacaWebSocketManager extends WebSocketManager {
      * Subscribe to trade_updates stream (idempotent)
      */
     private async subscribeStream(): Promise<void> {
-        if (!this.ws || this.subscribed) return;
+        if (!this.websocket || this.subscribed) return;
         const listenPayload = {
             action: 'listen',
             data: {
                 streams: ['trade_updates']
             }
         };
-        this.ws.send(JSON.stringify(listenPayload));
+        this.websocket.send(JSON.stringify(listenPayload));
         this.subscribed = true;
     }
 
