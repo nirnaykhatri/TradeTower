@@ -25,11 +25,33 @@ export class DCAFuturesStrategy extends BaseDCAStrategy<DCAFuturesConfig> {
 
     /**
      * Initialize the DCA Futures strategy with leverage configuration
+     * 
+     * Sets up leverage and margin mode on the exchange connector.
+     * This must be called before placing orders to ensure leverage is applied.
+     * 
      * @returns Promise<void>
      */
     async initialize(): Promise<void> {
         await super.initialize();
-        console.log(`[DCAFutures] Setting leverage to ${this.config.leverage}x with ${this.config.marginType} margin.`);
+        
+        // Apply leverage and margin configuration if connector supports it
+        const leverageMethod = (this.exchange as any).setLeverage;
+        if (typeof leverageMethod === 'function') {
+            try {
+                console.log(`[DCAFutures] Setting leverage to ${this.config.leverage}x with ${this.config.marginType} margin.`);
+                await leverageMethod.call(
+                    this.exchange,
+                    this.config.leverage,
+                    this.config.marginType === 'ISOLATED' ? 'isolated' : 'cross'
+                );
+            } catch (error: any) {
+                console.error(`[DCAFutures] Failed to set leverage: ${error?.message}`);
+                // Don't fail initialization, but warn the user
+                console.warn(`[DCAFutures] WARNING: Leverage may not have been applied. Check exchange settings.`);
+            }
+        } else {
+            console.warn(`[DCAFutures] Exchange connector does not support setLeverage. Ensure leverage is pre-configured on the exchange account.`);
+        }
     }
 
     /**

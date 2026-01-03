@@ -140,3 +140,4 @@ export * from './services/ProfitCalculator';
 export * from './services/DependencyInjection';
 export * from './services/ConfigValidator';
 export * from './services/OrderPlacementService';
+export * from './types/PositionTracker';

@@ -1,5 +1,5 @@
 import { BaseStrategy, ExitMode } from './BaseStrategy';
-import { TradeOrder, indicatorService, botRepository, ValidationError, CriticalStrategyError, signalCache } from '@trading-tower/shared';
+import { TradeOrder, indicatorService, botRepository, ValidationError, CriticalStrategyError, signalCache, PositionTracker, PositionTrackerImpl } from '@trading-tower/shared';
 import { ServiceBusSignalMessage } from '../services/ServiceBusSignalListener';
 import {
     MAX_FILL_HISTORY,
@@ -7,6 +7,26 @@ import {
     PUMP_PROTECTION_WINDOW_MS,
     PRICE_TOLERANCE
 } from '../constants/strategy.constants';
+
+/**
+ * Entry condition types for DCA base order triggering
+ */
+export enum EntryCondition {
+    IMMEDIATELY = 'IMMEDIATELY',
+    INDICATOR = 'INDICATOR',
+    TRADINGVIEW = 'TRADINGVIEW'
+}
+
+/**
+ * Exit reason types for strategy termination
+ */
+export enum ExitReason {
+    TAKE_PROFIT = 'Take Profit',
+    TRAILING_TP = 'Trailing Take Profit',
+    STOP_LOSS = 'Stop Loss',
+    TRAILING_SL = 'Stop Loss (Trailing)',
+    LIQUIDATION = 'Liquidation Protection'
+}
 
 /**
  * Base Dollar Cost Averaging Strategy
@@ -32,32 +52,36 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
     /** All filled orders in current cycle */
     protected filledOrders: TradeOrder[] = [];
 
-    /** Volume-weighted average entry price */
-    protected avgEntryPrice: number = 0;
-    
-    /** Total position size in base asset */
-    protected totalAmountFilled: number = 0;
-    
-    /** Total spent in quote asset */
-    protected totalQuoteAssetSpent: number = 0;
+    /** Consolidated position state tracker */
+    protected position: PositionTracker = new PositionTrackerImpl();
 
-    /** Count of filled safety orders */
-    protected safetyOrdersFilledCount: number = 0;
+    // === Property accessors for backward compatibility with existing code ===
+    protected get avgEntryPrice(): number { return this.position.avgEntryPrice; }
+    protected set avgEntryPrice(val: number) { this.position.avgEntryPrice = val; }
     
-    /** Next safety order index to place */
-    protected nextSafetyOrderToIndex: number = 0;
-
-    /** Whether trailing take profit is active */
-    protected isTrailingTP: boolean = false;
+    protected get totalAmountFilled(): number { return this.position.totalAmountFilled; }
+    protected set totalAmountFilled(val: number) { this.position.totalAmountFilled = val; }
     
-    /** Peak price for trailing TP calculation */
-    protected trailingTPPrice: number = 0;
-
-    /** Current stop loss trigger price */
-    protected currentSLPrice: number = 0;
-
-    /** Whether waiting for entry condition */
-    protected isWaitingForEntry: boolean = false;
+    protected get totalQuoteAssetSpent(): number { return this.position.totalQuoteAssetSpent; }
+    protected set totalQuoteAssetSpent(val: number) { this.position.totalQuoteAssetSpent = val; }
+    
+    protected get safetyOrdersFilledCount(): number { return this.position.safetyOrdersFilledCount; }
+    protected set safetyOrdersFilledCount(val: number) { this.position.safetyOrdersFilledCount = val; }
+    
+    protected get nextSafetyOrderToIndex(): number { return this.position.nextSafetyOrderToIndex; }
+    protected set nextSafetyOrderToIndex(val: number) { this.position.nextSafetyOrderToIndex = val; }
+    
+    protected get isTrailingTP(): boolean { return this.position.isTrailingTP; }
+    protected set isTrailingTP(val: boolean) { this.position.isTrailingTP = val; }
+    
+    protected get trailingTPPrice(): number { return this.position.trailingTPPrice; }
+    protected set trailingTPPrice(val: number) { this.position.trailingTPPrice = val; }
+    
+    protected get currentSLPrice(): number { return this.position.currentSLPrice; }
+    protected set currentSLPrice(val: number) { this.position.currentSLPrice = val; }
+    
+    protected get isWaitingForEntry(): boolean { return this.position.isWaitingForEntry; }
+    protected set isWaitingForEntry(val: boolean) { this.position.isWaitingForEntry = val; }
 
     /** Peak equity for drawdown calculation */
     private peakEquity: number = 0;
@@ -79,6 +103,47 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
 
     /** Get DCA configuration from derived class */
     protected abstract get dcaConfig(): any;
+
+    /**
+     * Get order side (buy/sell) based on strategy direction
+     * @returns 'buy' for LONG, 'sell' for SHORT
+     */
+    protected getOrderSide(): 'buy' | 'sell' {
+        return this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
+    }
+
+    /**
+     * Get unrealized PnL factor
+     * Used for calculating unrealized profit/loss
+     * @returns 1 for LONG (positive when price up), -1 for SHORT (positive when price down)
+     */
+    protected getUnrealizedPnLFactor(): number {
+        return this.dcaConfig.strategy === 'LONG' ? 1 : -1;
+    }
+
+    /**
+     * Get stop loss factor
+     * Used for calculating stop loss price relative to entry
+     * @returns -1 for LONG (SL below entry), 1 for SHORT (SL above entry)
+     */
+    protected getStopLossFactor(): number {
+        return this.dcaConfig.strategy === 'LONG' ? -1 : 1;
+    }
+
+    /**
+     * Check if price is within configured bounds
+     * @param price Current market price
+     * @returns True if price is between minPrice and maxPrice
+     */
+    protected isPriceWithinBounds(price: number): boolean {
+        if (this.dcaConfig.minPrice && price < this.dcaConfig.minPrice) {
+            return false;
+        }
+        if (this.dcaConfig.maxPrice && price > this.dcaConfig.maxPrice) {
+            return false;
+        }
+        return true;
+    }
 
     /**
      * Initialize DCA strategy
@@ -105,9 +170,9 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         // Check Kill-Switches (Global Profit/Loss)
         if (this.checkGlobalKillSwitches()) return;
 
-        const condition = this.dcaConfig.baseOrderCondition || 'IMMEDIATELY';
+        const condition = (this.dcaConfig.baseOrderCondition || 'IMMEDIATELY') as EntryCondition;
 
-        if (condition === 'IMMEDIATELY') {
+        if (condition === EntryCondition.IMMEDIATELY) {
             // Check if we need to reserve funds first
             if (this.dcaConfig.maxPrice && this.dcaConfig.reserveFundsEnabled !== false) {
                 await this.placeReservationOrders();
@@ -166,8 +231,8 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         const ticker = await this.exchange.getTicker(this.bot.pair);
         const price = ticker.lastPrice;
 
-        // Check price bounds - price must be at or below maxPrice to enter
-        if (this.dcaConfig.maxPrice && price > this.dcaConfig.maxPrice) {
+        // Check price bounds
+        if (!this.isPriceWithinBounds(price)) {
             this.isWaitingForEntry = true;
             return;
         }
@@ -177,18 +242,13 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             await this.cancelReservationOrders();
         }
 
-        if (this.dcaConfig.minPrice && price < this.dcaConfig.minPrice) {
-            this.isWaitingForEntry = true;
-            return;
-        }
-
         // Check pump protection
         if (this.dcaConfig.pumpProtection && this.detectUnusualVelocity()) {
             this.isWaitingForEntry = true;
             return;
         }
 
-        const side = this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
+        const side = this.getOrderSide();
         const type = this.dcaConfig.baseOrderType?.toLowerCase() || 'market';
 
         try {
@@ -211,7 +271,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
 
             // Set initial stop loss
             if (this.dcaConfig.stopLossPercent) {
-                const factor = this.dcaConfig.strategy === 'LONG' ? -1 : 1;
+                const factor = this.getStopLossFactor();
                 this.currentSLPrice = price * (1 + (this.dcaConfig.stopLossPercent / 100) * factor);
             }
 
@@ -240,7 +300,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         const ticker = await this.exchange.getTicker(this.bot.pair);
         const currentPrice = ticker.lastPrice;
         
-        const side = this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
+        const side = this.getOrderSide();
         
         // Calculate reservation price far from market (per Bitsgap: very far away)
         // Use 50% deviation to ensure order never fills accidentally
@@ -365,9 +425,9 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
     async onCandleClose(candle: any): Promise<void> {
         if (this.isPaused || !this.isWaitingForEntry) return;
 
-        const condition = this.dcaConfig.baseOrderCondition;
+        const condition = (this.dcaConfig.baseOrderCondition || 'IMMEDIATELY') as EntryCondition;
 
-        if (condition === 'INDICATOR') {
+        if (condition === EntryCondition.INDICATOR) {
             // Evaluate all entry indicators on candle close
             const indicators = this.dcaConfig.entryIndicators?.length
                 ? this.dcaConfig.entryIndicators
@@ -392,7 +452,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             } catch (error) {
                 console.error('[DCA] Indicator evaluation failed on candle close:', error);
             }
-        } else if (condition === 'TRADINGVIEW') {
+        } else if (condition === EntryCondition.TRADINGVIEW) {
             // Check if TradingView signal was cached
             const tvSignal = signalCache.getSignal(this.bot.id);
             if (tvSignal) {
@@ -410,19 +470,19 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
      * @returns True if signal is valid for this bot's entry condition
      */
     private validateSignalForEntry(message: ServiceBusSignalMessage): boolean {
-        const condition = this.dcaConfig.baseOrderCondition;
+        const condition = (this.dcaConfig.baseOrderCondition || 'IMMEDIATELY') as EntryCondition;
         
-        if (!condition || condition === 'IMMEDIATELY') {
+        if (!condition || condition === EntryCondition.IMMEDIATELY) {
             console.warn(`[DCA] Bot ${this.bot.id} has ${condition} condition, ignoring signal`);
             return false;
         }
 
-        if (condition === 'INDICATOR' && message.source !== 'INDICATOR') {
+        if (condition === EntryCondition.INDICATOR && message.source !== 'INDICATOR') {
             console.warn(`[DCA] Bot ${this.bot.id} expects INDICATOR signal but received ${message.source}`);
             return false;
         }
 
-        if (condition === 'TRADINGVIEW' && message.source !== 'TRADINGVIEW') {
+        if (condition === EntryCondition.TRADINGVIEW && message.source !== 'TRADINGVIEW') {
             console.warn(`[DCA] Bot ${this.bot.id} expects TRADINGVIEW signal but received ${message.source}`);
             return false;
         }
@@ -523,7 +583,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         const feePctBuffer = this.feeBuffer * 100 * 2; // round-trip fee allowance
 
         const perf = this.bot.performance;
-        const factor = this.dcaConfig.strategy === 'LONG' ? 1 : -1;
+        const factor = this.getUnrealizedPnLFactor();
 
         perf.unrealizedPnL = (price - this.avgEntryPrice) * this.totalAmountFilled * factor;
         perf.totalPnL = perf.botProfit + perf.unrealizedPnL;
@@ -547,13 +607,15 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 this.trailingTPPrice = price;
             }
             if (this.isTrailingTP) {
-                if ((this.dcaConfig.strategy === 'LONG' && price > this.trailingTPPrice) ||
-                    (this.dcaConfig.strategy === 'SHORT' && price < this.trailingTPPrice)) {
+                const isNewHigh = this.dcaConfig.strategy === 'LONG' ? 
+                    price > this.trailingTPPrice : 
+                    price < this.trailingTPPrice;
+                if (isNewHigh) {
                     this.trailingTPPrice = price;
                 }
                 const reversal = Math.abs(price - this.trailingTPPrice) / this.trailingTPPrice * 100;
                 if (reversal >= (this.dcaConfig.trailingTPStep || 0.5)) {
-                    await this.executeExit('Trailing Take Profit');
+                    await this.executeExit(ExitReason.TRAILING_TP);
                     return;
                 }
             }
@@ -563,13 +625,15 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
                 canExit = await this.checkIndicatorCondition(this.dcaConfig.takeProfitCondition);
             }
             if (canExit) {
-                await this.executeExit('Take Profit');
+                await this.executeExit(ExitReason.TAKE_PROFIT);
                 return;
             }
         }
 
         if (this.dcaConfig.trailingSL && this.dcaConfig.trailingSLStep) {
-            const slStepFactor = this.dcaConfig.strategy === 'LONG' ? (1 - this.dcaConfig.trailingSLStep / 100) : (1 + this.dcaConfig.trailingSLStep / 100);
+            const slStepFactor = this.dcaConfig.strategy === 'LONG' ? 
+                (1 - this.dcaConfig.trailingSLStep / 100) : 
+                (1 + this.dcaConfig.trailingSLStep / 100);
             const potentialNewSL = price * slStepFactor;
             if (this.dcaConfig.strategy === 'LONG' && potentialNewSL > this.currentSLPrice) {
                 this.currentSLPrice = potentialNewSL;
@@ -579,9 +643,11 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         }
 
         if (this.currentSLPrice > 0) {
-            const slTriggered = this.dcaConfig.strategy === 'LONG' ? price <= this.currentSLPrice : price >= this.currentSLPrice;
+            const slTriggered = this.dcaConfig.strategy === 'LONG' ? 
+                price <= this.currentSLPrice : 
+                price >= this.currentSLPrice;
             if (slTriggered) {
-                await this.executeExit('Stop Loss (Trailing)');
+                await this.executeExit(ExitReason.TRAILING_SL);
                 return;
             }
         }
@@ -596,7 +662,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
      * @param amount Amount of base asset to buy/sell
      */
     async manualAveragingBuy(amount: number): Promise<void> {
-        const side = this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
+        const side = this.getOrderSide();
         try {
             const order = await this.executeOrderWithRetry({
                 userId: this.bot.userId,
@@ -644,7 +710,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
      */
     protected calculatePnL(currentPrice: number): number {
         if (this.avgEntryPrice === 0) return 0;
-        const factor = this.dcaConfig.strategy === 'LONG' ? 1 : -1;
+        const factor = this.getUnrealizedPnLFactor();
         return ((currentPrice - this.avgEntryPrice) / this.avgEntryPrice) * 100 * factor;
     }
 
@@ -696,7 +762,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         }
         
         const initialPrice = this.filledOrders[0]?.price || await this.getCurrentPrice();
-        const side = this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell';
+        const side = this.getOrderSide();
         const price = side === 'buy' 
             ? initialPrice * (1 - totalDeviation / 100) 
             : initialPrice * (1 + totalDeviation / 100);
@@ -758,7 +824,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
             
             // Calculate realized PnL
             const realizedQuote = order.amount * order.price;
-            const factor = this.dcaConfig.strategy === 'LONG' ? 1 : -1;
+            const factor = this.getUnrealizedPnLFactor();
             const tradePnL = (realizedQuote - this.totalQuoteAssetSpent) * factor;
 
             order.profit = tradePnL;
@@ -842,15 +908,40 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
         
         const perf = this.bot.performance;
         const isPositionIncreasing = order.side === (this.dcaConfig.strategy === 'LONG' ? 'buy' : 'sell');
-        
+
         if (isPositionIncreasing) {
-            // Calculate new average entry price
+            // Calculate new average entry price when position increases
             this.totalQuoteAssetSpent += (order.amount * order.price);
             this.totalAmountFilled += order.amount;
             this.avgEntryPrice = this.totalQuoteAssetSpent / this.totalAmountFilled;
-            perf.baseBalance += order.amount;
+
+            // Update base balance (long adds, short subtracts)
+            if (this.dcaConfig.strategy === 'LONG') {
+                perf.baseBalance += order.amount;
+            } else {
+                perf.baseBalance -= order.amount;
+            }
+
+            // Recalculate stop loss off the new average if configured
+            if (this.dcaConfig.stopLossPercent && this.avgEntryPrice > 0) {
+                const factor = this.dcaConfig.strategy === 'LONG' ? -1 : 1;
+                this.currentSLPrice = this.avgEntryPrice * (1 + (this.dcaConfig.stopLossPercent / 100) * factor);
+            }
         } else {
-            perf.baseBalance -= order.amount;
+            // Position decreases: reduce totals using current average entry
+            const costBasis = order.amount * this.avgEntryPrice;
+            this.totalQuoteAssetSpent = Math.max(this.totalQuoteAssetSpent - costBasis, 0);
+            this.totalAmountFilled = Math.max(this.totalAmountFilled - order.amount, 0);
+            this.avgEntryPrice = this.totalAmountFilled > 0
+                ? this.totalQuoteAssetSpent / this.totalAmountFilled
+                : 0;
+
+            // Update base balance (long sells reduce, short buys cover/increase balance)
+            if (this.dcaConfig.strategy === 'LONG') {
+                perf.baseBalance -= order.amount;
+            } else {
+                perf.baseBalance += order.amount;
+            }
         }
         
         this.filledOrders.push(order);
@@ -937,7 +1028,7 @@ export abstract class BaseDCAStrategy<T extends any> extends BaseStrategy<T> {
 
         // Recalculate SL if currently active, as average price will change
         if (this.dcaConfig.stopLossPercent && this.avgEntryPrice > 0) {
-            const factor = this.dcaConfig.strategy === 'LONG' ? -1 : 1;
+            const factor = this.getStopLossFactor();
             const newSLPrice = this.avgEntryPrice * (1 + (this.dcaConfig.stopLossPercent / 100) * factor);
             console.log(`[DCA] Stop Loss recalculated: ${this.currentSLPrice.toFixed(8)} → ${newSLPrice.toFixed(8)}`);
             this.currentSLPrice = newSLPrice;

@@ -76,6 +76,18 @@ export interface IExchangeConnector {
     cancelOrder(orderId: string, symbol: string): Promise<boolean>;
     getOrder(orderId: string, symbol: string): Promise<TradeOrder>;
 
+    // Leverage & Margin (optional, for futures trading)
+    /**
+     * Set leverage for futures trading
+     * Implementations should support exchanges like Binance, Bitget, OKX, etc.
+     * 
+     * @param leverage Leverage multiplier (e.g., 2, 5, 10)
+     * @param marginType 'isolated' for isolated margin, 'cross' for cross margin
+     * @returns Promise that resolves when leverage is set
+     * @throws If leverage is not supported or exceeds exchange limits
+     */
+    setLeverage?(leverage: number, marginType: 'isolated' | 'cross'): Promise<void>;
+
     // WebSocket Order Fill Subscriptions
     /**
      * Subscribe a listener to receive order fill events for a specific trading pair.

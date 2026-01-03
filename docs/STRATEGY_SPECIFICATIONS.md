@@ -639,7 +639,454 @@ Added Funds: 500 USDT
 
 ---
 
-## 3. **BTD (Buy The Dip) Bot**
+## 3. **DCA Futures Bot**
+
+### Overview
+
+The DCA Futures Bot extends dollar-cost averaging to leveraged futures markets, enabling traders to build positions efficiently with **amplified capital deployment**. This strategy combines systematic position averaging with margin trading capabilities, allowing traders to leverage their investment while maintaining disciplined risk management through automated stop losses, take profits, and liquidation protection.
+
+**Core Principle**: Execute systematic buy/sell orders at multiple price levels using configurable leverage (1x-10x) in isolated or cross margin mode. Each filled order triggers additional "safety orders" at progressively wider price intervals, reducing average entry cost while building a leveraged position.
+
+**Ideal For**:
+- Directional market views (bullish LONG or bearish SHORT)
+- Accumulation with leverage amplification
+- Risk-managed position building with predefined exit conditions
+- Traders requiring flexible margin modes for different risk profiles
+
+### Key Differences from Spot DCA
+
+| Aspect | Spot DCA | DCA Futures |
+|--------|----------|-------------|
+| **Leverage** | 1x only (none) | 1x-10x configurable |
+| **Margin Mode** | N/A | Isolated or Cross |
+| **Direction** | Buy only | LONG or SHORT |
+| **Liquidation** | N/A | Active monitoring + buffer protection |
+| **Position Type** | Asset accumulation | Leveraged directional bet |
+| **Risk Profile** | Lower | Higher (amplified by leverage) |
+| **Profit Potential** | Linear with price | Amplified (leverage multiplier) |
+
+### Configuration Fields
+
+| Field | Type | Required | Description | Validation | Notes |
+|-------|------|----------|-------------|------------|-------|
+| `exchange` | String | Yes | Connected futures exchange | Valid exchange connector | Binance, OKX, Bybit, etc. |
+| `pair` | String | Yes | Trading pair | Valid futures pair | BTC/USDT, ETH/USDT, etc. |
+| `strategy` | Enum | Yes | Position direction | LONG \| SHORT | Determines buy/sell bias |
+| `leverage` | Decimal | Yes | Position leverage | 1.0 - max exchange limit | 1=1x, 10=10x, etc. |
+| `marginType` | Enum | Yes | Margin mode | ISOLATED \| CROSS | Account-level setting sync |
+| `baseOrderAmount` | Decimal | Yes | Initial order size | > exchange minimum | Quote currency amount |
+| `safetyOrderAmount` | Decimal | Yes | First safety order size | > 0, typically > baseOrderAmount | Amount multiplier applied per level |
+| `safetyOrderStepMultiplier` | Decimal | Yes | Price step multiplier | 1.0 - 5.0 (typical) | Increases price distance between levels |
+| `safetyOrderAmountMultiplier` | Decimal | Yes | Martingale/Anti-martingale | 1.0 - 3.0 (typical) | Size scaling per level |
+| `maxSafetyOrders` | Integer | Yes | Maximum safety orders | 1 - 50 | Position accumulation limit |
+| `baseOrderCondition` | Enum | No | Entry trigger | IMMEDIATELY \| INDICATOR \| TRADINGVIEW | When to place base order |
+| `stopLossPercent` | Decimal | No | SL percentage | 0.1 - 100 | Price drop (LONG) or rise (SHORT) |
+| `stopLossType` | Enum | No | SL trigger type | PERCENT \| PRICE | Flexible exit pricing |
+| `stopLossPrice` | Decimal | No | Fixed SL price | > 0 | Absolute liquidation level |
+| `takeProfitPercent` | Decimal | No | TP percentage | 0.1 - 1000 | Profit target relative to entry |
+| `takeProfitType` | Enum | No | TP trigger type | PERCENT \| PRICE | Flexible profit target |
+| `takeProfitPrice` | Decimal | No | Fixed TP price | > 0 | Absolute profit target |
+| `trailingStopLoss` | Boolean | No | Trailing SL enabled | Default: false | Adaptive stop loss |
+| `trailingTakeProfit` | Boolean | No | Trailing TP enabled | Default: false | Adaptive profit taking |
+| `liquidationBuffer` | Decimal | No | Liquidation safety buffer | 1 - 10 (%) | Distance from liquidation price |
+| `minPrice` | Decimal | No | Minimum entry price | > 0 | Below this, skip orders |
+| `maxPrice` | Decimal | No | Maximum entry price | > minPrice | Above this, skip orders |
+| `reserveFundsEnabled` | Boolean | No | Reserve funds at max price | Default: true | Lock investment while waiting |
+| `pumpProtectionEnabled` | Boolean | No | Detect rapid fills | Default: true | Pause on velocity spike |
+
+### Execution Flow
+
+#### Initialization Phase
+
+1. **Verify Exchange Readiness**
+   - Confirm futures account status (active, no liquidation)
+   - Verify available balance ≥ (baseOrderAmount * leverage)
+   - Check margin mode matches configuration (ISOLATED/CROSS)
+
+2. **Set Leverage & Margin**
+   ```
+   [Strategy] → connector.setLeverage(leverage, marginType)
+   - Updates exchange account leverage setting
+   - Applied before any orders placed
+   - Gracefully degrades if unsupported
+   ```
+
+3. **Initialize Position Tracker**
+   - avgEntryPrice = 0 (no fills yet)
+   - totalAmountFilled = 0
+   - safetyOrdersFilledCount = 0
+   - Tracks position accounting across fills
+
+#### Base Order Placement
+
+**Condition Logic**:
+
+| Condition | Behavior | Use Case |
+|-----------|----------|----------|
+| **IMMEDIATELY** | Place base order at next price update | Urgent entry, no delay |
+| **INDICATOR** | Evaluate on candle close at configured timeframe | Technical analysis confirmation |
+| **TRADINGVIEW** | Wait for external signal via Service Bus | Third-party alert integration |
+
+**Placement Strategy**:
+
+For **LONG** position:
+- Order Type: **BUY** limit order
+- Price: Current price (market) or specific level
+- Size: `baseOrderAmount / price` (base currency units)
+- Rationale: Accumulate position during entry
+
+For **SHORT** position:
+- Order Type: **SELL** limit order
+- Price: Current price (market) or specific level
+- Size: `baseOrderAmount / price` (base currency units)
+- Rationale: Establish short position
+
+**Max Price Feature** (futures-specific):
+- If `maxPrice` configured and current price > maxPrice:
+  - Place **reservation order** far from market to lock investment
+  - Automatically cancel when price drops to maxPrice
+  - Resume normal entry logic once cancelled
+
+#### Safety Order (Averaging) Mechanics
+
+**Trigger**: Each time a previous order fills
+
+**Calculation**:
+
+```
+Price Offset:
+  priceStep = baseOrderPrice * (1 + safetyOrderStepMultiplier ^ safetyOrderIndex / 100)
+  
+For LONG:
+  safety_price = avgEntryPrice - priceStep  (buy lower)
+  
+For SHORT:
+  safety_price = avgEntryPrice + priceStep  (sell higher)
+
+Order Size (with Martingale):
+  safety_amount = safetyOrderAmount * (safetyOrderAmountMultiplier ^ safetyOrderIndex)
+
+Placement Limit:
+  maxSafetyOrders = configuration (e.g., 10 levels)
+  Only place if nextSafetyOrderToIndex < maxSafetyOrders
+```
+
+**Example - LONG BTC/USDT with leverage**:
+
+```
+Configuration:
+  baseOrderAmount: 1000 USDT
+  leverage: 5x (5000 USDT effective)
+  safetyOrderAmount: 1000 USDT
+  stepMultiplier: 1.2x
+  amountMultiplier: 1.1x
+  
+Scenario - Price declines:
+  Order 0 (Base):   @ 40,000 USDT, buy 0.25 BTC (1000/40k)
+  → Fill triggers Safety Order 0
+  
+  Order 1 (Safety): @ 39,200 USDT, buy 0.275 BTC (1100/39.2k)
+  → Fill triggers Safety Order 1
+  
+  Order 2 (Safety): @ 38,400 USDT, buy 0.3 BTC (1210/38.4k)
+  
+  Result: Averaged down, accumulated 0.825 BTC
+  avgEntryPrice = 3606 USDT per BTC (volume-weighted)
+```
+
+#### Stop Loss Management
+
+**Static Stop Loss** (percent-based):
+
+```
+For LONG:
+  SL_price = avgEntryPrice * (1 - stopLossPercent/100)
+  Trigger when price drops below SL_price
+
+For SHORT:
+  SL_price = avgEntryPrice * (1 + stopLossPercent/100)
+  Trigger when price rises above SL_price
+```
+
+**Trailing Stop Loss** (dynamic):
+
+```
+Logic:
+  1. Initialize SL as static price
+  2. When new high reached (LONG):
+     → Move SL up by (new_high - peak_price) * trailingPercent
+  3. When new low reached (SHORT):
+     → Move SL down by (peak_price - new_low) * trailingPercent
+  4. Exit only when SL breached (no lower = never)
+```
+
+**Fixed Price Stop Loss** (absolute):
+
+```
+stopLossType = PRICE:
+  SL_price = stopLossPrice (absolute level, not relative)
+  Useful for round numbers or key support/resistance
+```
+
+#### Take Profit Management
+
+**Static Take Profit** (percent-based):
+
+```
+For LONG:
+  TP_threshold = avgEntryPrice * (1 + takeProfitPercent/100)
+  Exit entire position when price ≥ TP_threshold
+
+For SHORT:
+  TP_threshold = avgEntryPrice * (1 - takeProfitPercent/100)
+  Exit entire position when price ≤ TP_threshold
+```
+
+**Trailing Take Profit** (peak-tracking):
+
+```
+Logic:
+  1. When PnL ≥ takeProfitPercent threshold:
+     → Activate trailing mode
+     → Record peak price
+  2. Monitor price reversals:
+     For LONG:
+       → Peak moves up: update peak
+       → Peak reversal of X%: exit entire position
+     For SHORT:
+       → Peak moves down: update peak
+       → Peak reversal of X%: exit entire position
+```
+
+#### Liquidation Protection (Futures-specific)
+
+**Liquidation Price Calculation**:
+
+```
+Simplified Formula (conservative estimate):
+  For LONG:
+    Liq_price = avgEntryPrice * (1 - 0.9 / leverage)
+  
+  For SHORT:
+    Liq_price = avgEntryPrice * (1 + 0.9 / leverage)
+
+Example (LONG, 40k entry, 5x leverage):
+  Liq_price = 40k * (1 - 0.9/5) = 40k * 0.82 = 32.8k
+  Distance = 19.2% drop to liquidation
+```
+
+**Buffer Enforcement**:
+
+```
+liquidationBuffer = 3 (percent)
+If (distance_to_liq ≤ liquidationBuffer):
+  → Log warning
+  → Immediately executeExit('Liquidation Protection')
+  → Close position at market
+```
+
+**Monitoring Loop** (in `onPriceUpdate`):
+
+```
+Every tick:
+  1. Calculate current liquidation price
+  2. Calculate distance to liquidation
+  3. If distance < buffer:
+     → Emergency exit entire position
+     → Log liquidation buffer breach
+     → Transition to STOPPED state
+```
+
+#### Exit & Position Closure
+
+**Exit Triggers**:
+
+| Trigger | Action | State After |
+|---------|--------|-------------|
+| **Take Profit (SL%)** | Market sell entire position | COMPLETED |
+| **Take Profit (Trailing)** | Market sell on reversal | COMPLETED |
+| **Stop Loss (%)** | Market sell at SL price | STOPPED |
+| **Stop Loss (Trailing)** | Market sell on SL breach | STOPPED |
+| **Liquidation Buffer** | Emergency market sell | STOPPED |
+| **User Stop** | Close per user's closureStrategy | STOPPED |
+
+**Closure Strategy Options**:
+
+```
+CLOSE_POSITIONS (default):
+  → Issue market sell order for entire position
+  → Lock in realized PnL
+  → Transition to bot COMPLETED state
+
+CANCEL_ORDERS:
+  → Cancel all active orders
+  → Keep position open (for manual closing)
+  → Transition to bot STOPPED state
+
+LIQUIDATE (aggressive):
+  → Force close immediately at market (worst case)
+  → Used only if emergency required
+```
+
+### Performance Monitoring
+
+#### Key Metrics
+
+| Metric | Description | Calculation |
+|--------|-------------|------------|
+| **Unrealized PnL** | Open position value vs. entry | (currentPrice - avgEntryPrice) * totalAmountFilled * leverage_factor |
+| **Unrealized %** | PnL as % of margin used | (unrealizedPnL / (baseOrderAmount * leverage)) * 100 |
+| **Total PnL** | Realized + Unrealized | Sum of closed + open position gains |
+| **Liquidation Price** | Price at which margin call triggers | Entry * (1 - 0.9/leverage) |
+| **Margin Ratio** | Used margin vs. available | (positionSize * leverage) / totalBalance |
+| **Break-Even** | Price where PnL = 0 | avgEntryPrice (position entry cost) |
+| **Filled Safety Orders** | Count of executed averaging | safetyOrdersFilledCount |
+
+#### Bot Performance Window
+
+**Real-time Tracking**:
+- Current unrealized PnL (quote currency)
+- Current unrealized % (percentage gain/loss)
+- Average entry price (volume-weighted)
+- Total position size (base currency)
+- Liquidation price & distance
+- Filled safety orders / total available
+- Daily average profit (if >1 day running)
+- Trading duration (hours/days)
+
+**Order Management**:
+- Completed trades (with profit per trade)
+- Open orders (active pending orders)
+- Reservation orders (if max price feature active)
+
+### Advanced Settings & Optimizations
+
+#### Indicator-Based Entry (INDICATOR condition)
+
+**Use Case**: Confirm entry signal from technical analysis before deploying capital
+
+**Configuration**:
+```typescript
+baseOrderCondition: 'INDICATOR'
+indicatorType: 'MACD' | 'RSI' | 'Stochastic'
+timeframe: '1h' | '4h' | '1d'
+signal: 'BUY' | 'SELL'
+```
+
+**Execution**:
+1. Bot waits in WAITING state
+2. On each candle close at specified timeframe:
+   - Fetch OHLCV data
+   - Calculate indicator
+   - Check if signal matches configuration
+3. Once matched: place base order immediately
+
+#### TradingView Alert Integration (TRADINGVIEW condition)
+
+**Use Case**: React to external trading signals via webhooks
+
+**Configuration**:
+```typescript
+baseOrderCondition: 'TRADINGVIEW'
+webhook_url: 'https://your-webhook-endpoint'
+```
+
+**Execution**:
+1. Bot waits in WAITING state
+2. TradingView alert → HTTP POST to webhook
+3. Service Bus listener routes signal to correct bot
+4. Bot validates signal source and places base order
+
+#### Pump Protection
+
+**Purpose**: Prevent buying during rapid price spikes
+
+**Mechanism**:
+
+```
+Velocity Detection:
+  Track timestamps of last N order fills
+  If > PUMP_PROTECTION_THRESHOLD fills in < PUMP_PROTECTION_WINDOW_MS:
+    → Pause new orders
+    → Enter PUMP state
+    → Resume automatically once window clears
+```
+
+**Configuration** (automatic, non-user):
+```
+PUMP_PROTECTION_THRESHOLD = 3 fills
+PUMP_PROTECTION_WINDOW_MS = 60 seconds
+```
+
+### Risk Management Best Practices
+
+#### Leverage Selection
+
+| Leverage | Risk Level | Margin Requirement | Use Case |
+|----------|-----------|-------------------|----------|
+| **1x-2x** | Low | 50-100% | Conservative, stable assets |
+| **3x-5x** | Medium | 20-33% | Moderate volatility, good risk/reward |
+| **5x-10x** | High | 10-20% | Experienced traders, high conviction |
+
+⚠️ **Warning**: Higher leverage = faster liquidation if trend reverses
+
+#### Liquidation Buffer Setting
+
+```
+Recommended Levels:
+  Conservative: 5-10%
+  Moderate:    3-5%
+  Aggressive:  1-3%
+  
+Trade-off:
+  Higher buffer = wider margin for error but less leverage
+  Lower buffer = use margin fully but closer to liquidation
+```
+
+#### Stop Loss Configuration
+
+```
+Rule of Thumb:
+  stopLossPercent ≥ (100 / leverage)
+  
+Examples:
+  5x leverage → SL ≥ 20% (safety margin above liquidation)
+  3x leverage → SL ≥ 33%
+  2x leverage → SL ≥ 50%
+```
+
+#### Position Sizing
+
+```
+Risk Per Trade:
+  maxRiskPercent = stopLossPercent / leverage
+  
+Example (5x, 20% SL):
+  maxRiskPercent = 20 / 5 = 4% per trade
+  
+Never Risk More Than 2-5% Per Position
+```
+
+### Troubleshooting
+
+#### Liquidation Risk Warnings
+
+| Warning | Cause | Resolution |
+|---------|-------|-----------|
+| "Distance to liquidation: 5%" | Too much leverage or adverse price | Reduce leverage or add funds |
+| "Margin ratio: 95%" | Almost fully leveraged | Close some positions |
+| "Stop loss too close to liquidation" | Config error | Increase stop loss percent |
+
+#### Insufficient Margin
+
+| Error | Cause | Resolution |
+|-------|-------|-----------|
+| "Cannot place safety order: insufficient balance" | Margin fully deployed | Add funds or reduce leverage |
+| "Liquidation imminent" | Price approaching liq level | Close positions immediately |
+
+---
+
+## 4. **BTD (Buy The Dip) Bot**
 
 ### Overview
 
@@ -955,7 +1402,7 @@ Effects:
 
 ---
 
-## 4. **Combo Bot**
+## 5. **Combo Bot**
 
 ### Overview
 Combines DCA-based entry strategy with Grid-based profit-taking strategy. The bot uses Martingale/Safety Orders to average down on entry while distributing exit orders across multiple price levels to take profit.
@@ -1037,7 +1484,7 @@ Combines DCA-based entry strategy with Grid-based profit-taking strategy. The bo
 
 ---
 
-## 5. **Loop Bot (Recurring Buy/Sell Grid)**
+## 6. **Loop Bot (Recurring Buy/Sell Grid)**
 
 ### Overview
 
@@ -1584,7 +2031,7 @@ When you stop a Loop Bot, you have three closure strategies:
 
 ---
 
-## 6. **DCA Futures Bot** ⭐ NEW
+## 7. **Futures Grid Bot** ⭐ NEW
 
 ### Overview
 DCA strategy specifically for futures/derivatives markets with leverage support.

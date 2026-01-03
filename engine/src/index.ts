@@ -24,6 +24,7 @@ main().catch(err => {
 export * from './strategies/BaseStrategy';
 export * from './strategies/GridStrategy';
 export * from './strategies/DCAStrategy';
+export * from './strategies/BaseDCAStrategy';
 export * from './strategies/BTDStrategy';
 export * from './strategies/ComboStrategy';
 export * from './strategies/LoopStrategy';
