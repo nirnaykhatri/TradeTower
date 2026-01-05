@@ -1,0 +1,17 @@
+Here is the bot settings:
+
+Exchange: Coinbase Futures
+Pair: UNIUSDC
+Direction: Long
+Initial margin: 199.00 USDC
+Margin type: Isolated
+Leverage: 3x
+Profit currency: USDC
+DCA orders: ≈ 52.750 UNI
+Grid orders: ≈ 50.973 UNI
+High price: 7.077
+Low price: 5.303
+DCA & Grid levels: 30
+DCA & Grid step: 1.00 %
+Stop Loss: 4.283
+Take Profit: 8.00 %
