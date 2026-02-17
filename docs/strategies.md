@@ -2034,45 +2034,6 @@ When you stop a Loop Bot, you have three closure strategies:
 ## 7. **Futures Grid Bot** ⭐ NEW
 
 ### Overview
-DCA strategy specifically for futures/derivatives markets with leverage support.
-
-### Configuration Fields
-
-| Field | Type | Required | Description | Validation |
-|-------|------|----------|-------------|------------|
-| `exchange` | String | Yes | Futures exchange (e.g., Coinbase Futures) | Must support futures |
-| `pair` | String | Yes | Futures pair (e.g., BTCUSDC) | Valid futures pair |
-| `strategy` | Enum | Yes | `LONG` or `SHORT` | - |
-| `initialMargin` | Decimal | Yes | Initial margin (USDC) | > min margin |
-| `leverage` | Decimal | Yes | Leverage multiplier | 1.0-125.0 (exchange dependent) |
-| `marginType` | Enum | Yes | `CROSS` or `ISOLATED` | - |
-| `baseOrderAmount` | Decimal | Yes | First position size | > 0 |
-| `averagingOrdersAmount` | Decimal | Yes | Averaging order size | > 0 |
-| `averagingOrdersQuantity` | Integer | Yes | Number of averaging orders | 0-50 |
-| `averagingOrdersStep` | Decimal | Yes | Price step % | 0.1-50 |
-| `takeProfitPercent` | Decimal | No | Target profit % | 0.1-1000 |
-| `stopLossPercent` | Decimal | No | Stop loss % | 0-100 |
-| `liquidationBuffer` | Decimal | No | Safety buffer from liquidation (%) | 5-50 |
-
-### Execution Logic
-1. Open leveraged position (long/short) with initial margin
-2. Monitor unrealized PnL
-3. If price moves against position by `averagingOrdersStep` → add to position (DCA)
-4. Track average entry price with leverage
-5. Close position when TP reached
-6. Monitor liquidation price and enforce buffer
-7. Auto-close if SL triggered
-
-### Risk Warnings
-- **High Risk**: Futures trading with leverage can result in liquidation
-- Monitor margin ratio continuously
-- Enforce strict risk management with `liquidationBuffer`
-
----
-
-## 7. **Futures Grid Bot** ⭐ NEW
-
-### Overview
 Combines grid trading efficiency with futures leverage. Places buy and sell orders within a price range using futures contracts to profit from volatility in either direction (Long/Short/Neutral).
 
 ### Configuration Fields
@@ -2316,7 +2277,8 @@ interface BotConfig {
   id: string;
   userId: string; // Partition key
   strategyType: 'GRID' | 'DCA' | 'BTD' | 'COMBO' | 'LOOP' | 'DCA_FUTURES' | 'FUTURES_GRID' | 'TWAP';
-  status: 'stopped' | 'running' | 'paused' | 'completed' | 'error';
+  // Canonical BotState enum — see 04-data-architecture.md for authoritative definition
+  status: 'INITIALIZING' | 'FUNDS_RESERVED' | 'WAITING' | 'ACTIVE' | 'TRAILING' | 'PUMP' | 'PAUSED' | 'CLOSING' | 'STOPPED' | 'COMPLETED' | 'ERROR';
   config: GridConfig | DCAConfig | BTDConfig | ComboConfig | LoopConfig | DCAFuturesConfig | FuturesGridConfig | TWAPConfig;
   createdAt: Date;
   updatedAt: Date;
